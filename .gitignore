@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.log
+*.pdf
+*.bak
+*.bak_*
+uploads/
+venv/
+vision/venv/
+vision/.env
+.env
+*.json
+!cdm_learned_config.json
+!all_pumps_database.json
