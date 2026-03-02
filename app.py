@@ -204,7 +204,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         </div>
 
         {% if not parsed_data %}
-        <form method="POST" action="upload" enctype="multipart/form-data" id="upload-form">
+        <form method="POST" action="/upload" enctype="multipart/form-data" id="upload-form">
             <div class="upload-section" id="drop-zone">
                 <div class="upload-icon">📄</div>
                 <div>
@@ -257,7 +257,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
         function pollProgress(taskId, totalPages) {
             var interval = setInterval(function() {
                 var r = new XMLHttpRequest();
-                r.open('GET', 'progress/' + taskId);
+                r.open('GET', '/progress/' + taskId);
                 r.addEventListener('load', function() {
                     try {
                         var d = JSON.parse(r.responseText);
@@ -267,7 +267,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                             pct.textContent = '100%';
                             title.textContent = 'Готово!';
                             setTimeout(function() {
-                                window.location.href = 'results/' + taskId;
+                                window.location.href = '/results/' + taskId;
                             }, 500);
                         } else if (d.status === 'error') {
                             clearInterval(interval);
@@ -350,10 +350,10 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
 
             <div class="actions">
                 {% if result_id %}
-                <a href="download/{{ result_id }}" class="btn">Скачать JSON</a>
+                <a href="/download/{{ result_id }}" class="btn">Скачать JSON</a>
                 <button class="btn" id="btn-save-bot" onclick="saveToBotKB('{{ result_id }}')">Загрузить в базу знаний бота</button>
                 {% endif %}
-                <a href="./" class="btn btn-secondary">Загрузить другой файл</a>
+                <a href="/" class="btn btn-secondary">Загрузить другой файл</a>
             </div>
             <div id="save-msg" class="message" style="display:none;"></div>
             <script>
@@ -363,7 +363,7 @@ HTML_TEMPLATE = '''<!DOCTYPE html>
                 btn.style.opacity = '0.6';
                 btn.disabled = true;
                 var r = new XMLHttpRequest();
-                r.open('POST', 'save_to_bot/' + taskId);
+                r.open('POST', '/save_to_bot/' + taskId);
                 r.addEventListener('load', function() {
                     var msg = document.getElementById('save-msg');
                     try {
@@ -540,7 +540,7 @@ def upload():
                         'status': 'done',
                         'catalog_type': catalog_type
                     }
-                    return redirect(f'results/{task_id}')
+                    return redirect(f'/results/{task_id}')
                 else:
                     flash('В PDF не найдено данных', 'error')
             except Exception as e:
