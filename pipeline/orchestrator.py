@@ -1,177 +1,220 @@
 """
-Pipeline Orchestrator: coordinates 4 stages sequentially.
-Docling → VLM → OCR → Self-correction → Brand → Done.
+Pipeline Orchestrator v2: simplified sequential approach.
+Docling first → stop Docling → VLM page-by-page → OCR verify → merge → restart Docling.
+No warmup hacks. VLM loads on first request naturally.
 """
+import os
 import time
+import base64
 import logging
+import subprocess
+import requests
 
 import sys
 sys.path.insert(0, "/root/pump_parser")
-from models.parse_result import ParseResult, StageResult
+from config import GPU_DOCLING_URL, GPU_VISION_URL
+from models.parse_result import PumpModelResult, ParseResult, StageResult
+from models.pump_model import detect_series, enrich_from_model_name, validate_pump_physics
 from pipeline.stage_docling import DoclingStage
-from pipeline.stage_vlm import VLMStage
 from pipeline.stage_ocr import OCRStage
-from pipeline.stage_selfcorrect import SelfCorrectionStage
 from pipeline.confidence import ConfidenceScorer
 from brand_qualifier import BrandQualifier
-from gpu_manager import stop_docling, start_docling
 
 logger = logging.getLogger(__name__)
 
+GPU_HOST = "82.22.53.231"
+SSH_CMD = 'sshpass -p "Kx9#mVp4\\!wL7nQ2z" ssh -o StrictHostKeyChecking=no root@' + GPU_HOST
+
+
+def _gpu_ssh(cmd):
+    try:
+        subprocess.run(f'{SSH_CMD} "{cmd}"', shell=True, timeout=30, capture_output=True)
+    except Exception:
+        pass
+
 
 class PipelineOrchestrator:
-    """Coordinates 4-stage parse pipeline."""
+    """Simplified 4-stage pipeline. Sequential Docling/VLM to avoid VRAM conflict."""
 
     def __init__(self):
         self.docling = DoclingStage()
-        self.vlm = VLMStage()
         self.ocr = OCRStage()
-        self.selfcorrect = SelfCorrectionStage(vlm_stage=self.vlm)
         self.scorer = ConfidenceScorer()
         self.brand_qualifier = BrandQualifier()
 
-    def parse(self, pdf_path: str, progress_cb=None) -> ParseResult:
-        """Run full 4-stage pipeline.
-        Args:
-            pdf_path: path to PDF catalog
-            progress_cb: optional callback(phase: str, pct: int)
-        Returns: ParseResult with models, brand, confidence scores.
-        """
+    def parse(self, pdf_path, progress_cb=None):
         t0 = time.time()
 
-        def _progress(phase, pct):
+        def _p(msg, pct):
             if progress_cb:
                 try:
-                    progress_cb(phase, pct)
+                    progress_cb(msg, pct)
                 except Exception:
                     pass
 
         # ── Stage 1: Docling ────────────────────────────────────────
-        _progress("Docling: извлечение таблиц...", 10)
-        logger.info("Stage 1: Docling starting for %s", pdf_path)
-
+        _p("Docling: извлечение таблиц...", 10)
         docling_result = self.docling.extract(pdf_path)
+        logger.info("Docling: %d models, %d tables", len(docling_result.models), len(docling_result.raw_tables))
 
-        logger.info("Stage 1 done: %d models, %d tables, errors=%s",
-                     len(docling_result.models), len(docling_result.raw_tables), docling_result.errors)
+        # ── Stage 2: VLM (stop Docling, VLM page-by-page) ──────────
+        _p("VLM: остановка Docling...", 25)
+        _gpu_ssh("systemctl stop docling-parser")
+        time.sleep(8)
 
-        # ── Stage 2: VLM ────────────────────────────────────────────
-        _progress("VLM: освобождение GPU...", 30)
-        logger.info("Stage 2: stopping Docling to free VRAM for VLM")
-        stop_docling()  # includes VLM warmup
-
-        _progress("VLM: валидация и дополнение...", 35)
-        logger.info("Stage 2: VLM starting")
-
-        vlm_result = StageResult(source="vlm")
-        try:
-            vlm_result = self.vlm.process(pdf_path, docling_result)
-        except Exception as e:
-            logger.error("Stage 2 VLM error: %s", e)
-            vlm_result.errors.append(str(e))
-
-        logger.info("Stage 2 done: %d models, errors=%s",
-                     len(vlm_result.models), vlm_result.errors)
+        _p("VLM: анализ страниц...", 30)
+        vlm_result = self._vlm_extract(pdf_path, docling_result)
+        logger.info("VLM: %d models from %d pages", len(vlm_result.models), vlm_result.pages_processed)
 
         # ── Merge Docling + VLM ─────────────────────────────────────
-        _progress("Объединение результатов...", 55)
-        merged = self._merge_stages(docling_result, vlm_result)
+        _p("Объединение результатов...", 60)
+        merged = self._merge(docling_result, vlm_result)
 
-        # ── Stage 3: OCR Verification (CPU — works with VLM loaded) ──
-        _progress("OCR: верификация чисел...", 60)
-        logger.info("Stage 3: OCR verification starting")
-
+        # ── Stage 3: OCR verification ───────────────────────────────
+        _p("OCR: верификация...", 65)
         ocr_result = StageResult(source="ocr")
         try:
             ocr_result = self.ocr.verify(pdf_path, merged)
         except Exception as e:
-            logger.error("Stage 3 OCR error: %s", e)
-            ocr_result.errors.append(str(e))
-
-        logger.info("Stage 3 done: %d verified, errors=%s",
-                     len(ocr_result.models), ocr_result.errors)
+            logger.warning("OCR error: %s", e)
 
         # ── Confidence scoring ──────────────────────────────────────
-        _progress("Расчёт confidence...", 70)
+        _p("Scoring...", 75)
         result = self.scorer.merge_all(docling_result, vlm_result, ocr_result)
 
-        # ── Stage 4: Self-correction (VLM still loaded — no restart!) ──
-        _progress("Self-correction: поиск пропущенных...", 75)
-        logger.info("Stage 4: Self-correction starting (VLM still active)")
+        # ── Restart Docling ─────────────────────────────────────────
+        _p("Перезапуск Docling...", 80)
+        _gpu_ssh("systemctl restart ollama && sleep 3 && systemctl start docling-parser")
 
-        gaps = [m for m in result.models if not m.is_complete]
-        if gaps:
-            try:
-                self.selfcorrect.fill_gaps(pdf_path, gaps)
-                result.stages_completed.append("selfcorrect")
-            except Exception as e:
-                logger.error("Stage 4 self-correct error: %s", e)
-                result.errors.append(f"Self-correct: {e}")
-
-        # ── NOW restart Docling (after all VLM work is done) ────────
-        _progress("Перезапуск Docling...", 85)
-        start_docling()
-
-        logger.info("Stage 4 done: %d/%d complete", result.complete_models, result.total_models)
-
-        # ── Brand qualification ─────────────────────────────────────
-        _progress("Определение бренда...", 90)
-
+        # ── Brand ───────────────────────────────────────────────────
+        _p("Определение бренда...", 90)
         try:
-            # Convert models to dicts for brand_qualifier
             model_dicts = [{"model": m.model, "id": m.model, "series": m.series} for m in result.models]
             br = self.brand_qualifier.qualify_full(pdf_path, model_dicts)
             result.brand = br.brand
             result.brand_confidence = br.confidence
             result.brand_source = br.source
             result.series_detected = br.series_detected
-        except Exception as e:
-            logger.warning("Brand qualification error: %s", e)
+        except Exception:
             result.brand = "Unknown"
 
-        # ── Finalize ────────────────────────────────────────────────
         result.elapsed = round(time.time() - t0, 1)
+        for s in [docling_result, vlm_result, ocr_result]:
+            result.errors.extend(s.errors)
 
-        # Collect all errors
-        for stage in [docling_result, vlm_result, ocr_result]:
-            result.errors.extend(stage.errors)
+        stages = []
+        if docling_result.models:
+            stages.append("docling")
+        if vlm_result.models:
+            stages.append("vlm")
+        if ocr_result.models:
+            stages.append("ocr")
+        result.stages_completed = stages
 
-        _progress("Готово!", 100)
-        logger.info("Pipeline complete: %d models (%d complete, %.0f%%), brand=%s, %.1fs",
+        _p("Готово!", 100)
+        logger.info("Pipeline: %d models, %d complete (%.0f%%), brand=%s, %.0fs",
                      result.total_models, result.complete_models, result.completeness,
                      result.brand, result.elapsed)
+        return result
+
+    def _vlm_extract(self, pdf_path, docling_result):
+        """VLM page-by-page extraction. No warmup — model loads on first request."""
+        result = StageResult(source="vlm")
+        try:
+            import fitz
+            doc = fitz.open(pdf_path)
+        except Exception as e:
+            result.errors.append(str(e))
+            return result
+
+        try:
+            # Determine which pages to process
+            pages_with_tables = set()
+            for t in docling_result.raw_tables:
+                pages_with_tables.add(t.get("page", 0))
+            # Also process first 20 pages if Docling found nothing
+            if not docling_result.models:
+                pages_to_check = list(range(min(20, len(doc))))
+            else:
+                pages_to_check = sorted(pages_with_tables)
+
+            for pg in pages_to_check:
+                if pg >= len(doc):
+                    continue
+                try:
+                    pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(1.5, 1.5))
+                    b64 = base64.b64encode(pix.tobytes("png")).decode()
+
+                    r = requests.post(
+                        f"http://{GPU_HOST}:8000/analyze",
+                        data={"image": b64, "task": "extract_pumps"},
+                        timeout=300,
+                    )
+                    if r.status_code != 200:
+                        continue
+
+                    d = r.json()
+                    if d.get("error"):
+                        logger.debug("VLM pg%d: model loading...", pg)
+                        continue
+
+                    pumps = d.get("pumps", [])
+                    if pumps:
+                        for p in pumps:
+                            name = p.get("model", "")
+                            if not name or len(name) < 2:
+                                continue
+                            result.models.append(PumpModelResult(
+                                model=name,
+                                series=detect_series(name),
+                                q=float(p.get("q_nom", 0) or 0),
+                                h=float(p.get("h_nom", 0) or 0),
+                                kw=float(p.get("power_kw", 0) or 0),
+                                page_number=pg,
+                                confidence_q=0.5 if p.get("q_nom") else 0,
+                                confidence_h=0.5 if p.get("h_nom") else 0,
+                                confidence_kw=0.5 if p.get("power_kw") else 0,
+                                source_q="vlm" if p.get("q_nom") else "",
+                                source_h="vlm" if p.get("h_nom") else "",
+                                source_kw="vlm" if p.get("power_kw") else "",
+                            ))
+                        result.pages_processed += 1
+                        logger.info("VLM pg%d: %d pumps", pg, len(pumps))
+
+                except requests.exceptions.Timeout:
+                    logger.warning("VLM pg%d: timeout", pg)
+                except Exception as e:
+                    logger.warning("VLM pg%d: %s", pg, e)
+
+        finally:
+            doc.close()
 
         return result
 
-    def _merge_stages(self, docling: StageResult, vlm: StageResult) -> StageResult:
-        """Intermediate merge: VLM fills Docling zeros."""
+    def _merge(self, docling, vlm):
+        """Merge: VLM fills Docling zeros."""
         merged = StageResult(source="docling+vlm")
-
-        # Build VLM map by key
         vlm_map = {m.key: m for m in vlm.models}
-
-        # Start with Docling models
         seen = set()
+
         for dm in docling.models:
             vm = vlm_map.get(dm.key)
             if vm:
-                # Fill zeros from VLM
                 if not dm.q and vm.q:
                     dm.q = vm.q
                     dm.confidence_q = vm.confidence_q
-                    dm.source_q = vm.source_q
+                    dm.source_q = "vlm"
                 if not dm.h and vm.h:
                     dm.h = vm.h
                     dm.confidence_h = vm.confidence_h
-                    dm.source_h = vm.source_h
+                    dm.source_h = "vlm"
                 if not dm.kw and vm.kw:
                     dm.kw = vm.kw
                     dm.confidence_kw = vm.confidence_kw
-                    dm.source_kw = vm.source_kw
+                    dm.source_kw = "vlm"
             merged.models.append(dm)
             seen.add(dm.key)
 
-        # Add VLM-only models (not in Docling)
         for vm in vlm.models:
             if vm.key not in seen:
                 merged.models.append(vm)
