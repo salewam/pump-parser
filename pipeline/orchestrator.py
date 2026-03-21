@@ -180,8 +180,9 @@ class PipelineOrchestrator:
                     pumps = d.get("pumps", [])
                     if pumps:
                         for p in pumps:
-                            name = p.get("model", "")
-                            if not name or len(name) < 2:
+                            name = str(p.get("model", "")).strip()
+                            # Filter: must be real pump model name (not just a number or 2-letter code)
+                            if not name or len(name) < 5 or name.isdigit():
                                 continue
                             result.models.append(PumpModelResult(
                                 model=name,
@@ -211,44 +212,66 @@ class PipelineOrchestrator:
         return result
 
     def _merge(self, docling, vlm):
-        """Merge: VLM fills Docling zeros. Uses fuzzy key matching."""
+        """Merge: VLM fills Docling zeros.
+        Strategy: group by Q+kW, sort by stages (from model name), assign H in order.
+        """
+        import re
         merged = StageResult(source="docling+vlm")
         vlm_map = {m.key: m for m in vlm.models}
 
-        # Also build fuzzy map: first word + first number -> model
-        import re
-        vlm_fuzzy = {}
+        # Group VLM models by Q+kW for fuzzy matching
+        vlm_by_qkw = {}  # (q, kw) -> [models sorted by H]
         for m in vlm.models:
-            # "CMI1-20" -> extract Q value as secondary match
-            if m.q > 0 and m.series:
-                fuzzy_key = f"{m.series}_{m.q}"
-                vlm_fuzzy[fuzzy_key] = m
+            if m.q > 0 and m.h > 0:
+                key = (round(m.q, 1), round(m.kw, 2))
+                vlm_by_qkw.setdefault(key, []).append(m)
+        # Sort each group by H ascending
+        for key in vlm_by_qkw:
+            vlm_by_qkw[key].sort(key=lambda m: m.h)
 
-        seen = set()
+        # Group Docling models by Q+kW, sort by stages from name
+        def _extract_stages(model_name):
+            """Extract stages number from model name: CMI 1-20 → 20, CMI 1-30 → 30."""
+            match = re.search(r'[-]\s*(\d+)', model_name)
+            return int(match.group(1)) if match else 0
 
+        doc_by_qkw = {}  # (q, kw) -> [(stages, model)]
         for dm in docling.models:
-            # Try exact match first
-            vm = vlm_map.get(dm.key)
-            # Fuzzy match: same series + same Q
-            if not vm and dm.series and dm.q > 0:
-                fuzzy_key = f"{dm.series}_{dm.q}"
-                vm = vlm_fuzzy.get(fuzzy_key)
-            if vm:
-                if not dm.q and vm.q:
-                    dm.q = vm.q
-                    dm.confidence_q = vm.confidence_q
-                    dm.source_q = "vlm"
-                if not dm.h and vm.h:
+            if dm.q > 0 and dm.kw > 0 and not dm.h:
+                key = (round(dm.q, 1), round(dm.kw, 2))
+                stages = _extract_stages(dm.model)
+                doc_by_qkw.setdefault(key, []).append((stages, dm))
+        # Sort by stages ascending
+        for key in doc_by_qkw:
+            doc_by_qkw[key].sort(key=lambda x: x[0])
+
+        # Match: for each Q+kW group, pair Docling (by stages asc) with VLM (by H asc)
+        filled = 0
+        for key, doc_group in doc_by_qkw.items():
+            vlm_group = vlm_by_qkw.get(key, [])
+            for i, (stages, dm) in enumerate(doc_group):
+                if i < len(vlm_group):
+                    vm = vlm_group[i]
                     dm.h = vm.h
-                    dm.confidence_h = vm.confidence_h
+                    dm.confidence_h = 0.5
                     dm.source_h = "vlm"
-                if not dm.kw and vm.kw:
-                    dm.kw = vm.kw
-                    dm.confidence_kw = vm.confidence_kw
-                    dm.source_kw = "vlm"
+                    filled += 1
+
+        logger.info("Merge: filled %d H values via Q+kW+stages matching", filled)
+
+        # Also try exact key match for any remaining
+        seen = set()
+        for dm in docling.models:
+            if not dm.h:
+                vm = vlm_map.get(dm.key)
+                if vm and vm.h:
+                    dm.h = vm.h
+                    dm.confidence_h = 0.5
+                    dm.source_h = "vlm"
             merged.models.append(dm)
             seen.add(dm.key)
 
+        # Add VLM-only models
         for vm in vlm.models:
             if vm.key not in seen:
                 merged.models.append(vm)
