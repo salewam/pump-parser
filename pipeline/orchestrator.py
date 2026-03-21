@@ -14,7 +14,7 @@ from pipeline.stage_ocr import OCRStage
 from pipeline.stage_selfcorrect import SelfCorrectionStage
 from pipeline.confidence import ConfidenceScorer
 from brand_qualifier import BrandQualifier
-from gpu_manager import stop_docling, start_docling
+from gpu_manager import stop_docling, start_docling, warmup_ollama
 
 logger = logging.getLogger(__name__)
 
@@ -57,8 +57,9 @@ class PipelineOrchestrator:
 
         # ── Stage 2: VLM ────────────────────────────────────────────
         _progress("VLM: освобождение GPU...", 30)
-        logger.info("Stage 2: stopping Docling to free VRAM")
+        logger.info("Stage 2: stopping Docling to free VRAM for VLM")
         stop_docling()
+        warmup_ollama()
 
         _progress("VLM: валидация и дополнение...", 35)
         logger.info("Stage 2: VLM starting")

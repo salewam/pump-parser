@@ -83,7 +83,8 @@ class VLMStage:
                 logger.warning("VLM attempt %d: %s", attempt, last_error)
 
             if attempt < self._retries:
-                backoff = 3 * attempt
+                backoff = 10 * attempt  # 10s, 20s, 30s — Ollama needs time to load
+                logger.info("VLM retry in %ds...", backoff)
                 time.sleep(backoff)
 
         logger.error("VLM %s: all retries failed (%s)", endpoint, last_error)

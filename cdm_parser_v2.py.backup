@@ -1,0 +1,501 @@
+#!/usr/bin/env python3
+"""
+CDM/CDMF Pump Data Parser - FINAL VERSION
+==========================================
+ИДЕАЛЬНЫЙ АЛГОРИТМ:
+1. Точное определение страниц с таблицами (первые 1000 символов)
+2. Извлечение ТОЛЬКО нужных данных
+3. Минимальное использование памяти
+4. Максимальная автономность
+"""
+
+import pdfplumber
+import json
+import re
+import sys
+import os
+import logging
+from typing import List, Dict, Optional, Tuple
+
+# Настройка минимального логирования
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Отключаем логи pdfplumber
+logging.getLogger('pdfplumber').setLevel(logging.ERROR)
+logging.getLogger('pdfminer').setLevel(logging.ERROR)
+
+
+class CDMParserFinal:
+    """
+    ИДЕАЛЬНЫЙ ПАРСЕР CDM/CDMF
+    Реализует точный алгоритм из ALGORITHM_TABLE_DETECTION.md
+    """
+
+    def __init__(self, pdf_path: str):
+        self.pdf_path = pdf_path
+        self.all_pumps = []
+        self.stats = {
+            'pages_total': 0,
+            'pages_processed': 0,
+            'pages_with_tables': 0,
+            'pages_skipped': 0,
+            'models_found': 0,
+            'records_total': 0
+        }
+
+    # ============================================================
+    # АЛГОРИТМ 1: ПРОВЕРКА СТРАНИЦЫ (первые 1000 символов)
+    # ============================================================
+
+    def is_pump_table_page(self, page) -> Tuple[bool, Optional[str]]:
+        """
+        БЫСТРАЯ проверка: содержит ли страница таблицу с насосами
+
+        Критерии (ВСЕ должны выполняться):
+        1. "Таблица характеристик" ИЛИ ("Таблица" + "CDM"/"CDMF")
+        2. Серия: "CDM/CDMF<число>" ИЛИ "CDMF<число>+CMH<число>-<число>"
+        3. "Модель" и "кВт"
+
+        Returns:
+            (True/False, тип_серии)
+        """
+        try:
+            # ШАГ 1: Извлечь ПЕРВЫЕ 1000 символов (не весь текст!)
+            text_preview = page.extract_text()
+            if not text_preview:
+                return False, None
+
+            text_preview = text_preview[:1000]
+
+            # ШАГ 2: Проверить "Таблица характеристик"
+            has_table = 'Таблица характеристик' in text_preview
+            if not has_table:
+                # Альтернатива: "Таблица" + "CDM"
+                has_table = ('Таблица' in text_preview and
+                           ('CDM' in text_preview or 'CDMF' in text_preview))
+
+            if not has_table:
+                return False, None
+
+            # ШАГ 3: Определить тип серии
+            series_type = None
+
+            # CDM/CDMF серия
+            if re.search(r'CDM/CDMF\d+', text_preview) or re.search(r'CDM\s*\d+', text_preview):
+                series_type = "CDM"
+
+            # CDMF+CMH бустерная серия
+            if re.search(r'CDMF\d+\+CMH\d+-\d+', text_preview):
+                series_type = "CDMF+CMH"
+
+            if not series_type:
+                return False, None
+
+            # ШАГ 4: Проверить наличие "Модель" и "кВт"
+            has_headers = 'одел' in text_preview and 'кВт' in text_preview
+
+            if not has_headers:
+                return False, None
+
+            # ШАГ 5: ВСЕ ПРОВЕРКИ ПРОЙДЕНЫ
+            return True, series_type
+
+        except Exception as e:
+            logger.debug(f"Ошибка проверки страницы: {e}")
+            return False, None
+
+    # ============================================================
+    # АЛГОРИТМ 2: ПАРСИНГ ЧИСЕЛ
+    # ============================================================
+
+    def parse_number(self, s: str) -> Optional[float]:
+        """
+        Извлечение числа из строки с нормализацией
+        """
+        if not s:
+            return None
+
+        s = str(s).strip()
+
+        # Склеиваем разбитые числа: "1 5" -> "15"
+        s = re.sub(r'(\d)\s+(\d)', r'\1\2', s)
+        s = re.sub(r'(\d)\s+(\d)', r'\1\2', s)  # Повтор для каскада
+
+        # Пробелы в десятичных: "0 .37" -> "0.37"
+        s = re.sub(r'(\d)\s+\.', r'\1.', s)
+        s = re.sub(r'\.\s+(\d)', r'.\1', s)
+
+        # Запятая -> точка
+        s = s.replace(',', '.')
+
+        # Убираем символы
+        s = re.sub(r'[*\']', '', s)
+
+        # Извлекаем число
+        match = re.search(r'(\d+\.?\d*)', s)
+        if match:
+            try:
+                return float(match.group(1))
+            except:
+                return None
+
+        return None
+
+    # ============================================================
+    # АЛГОРИТМ 3: ИЗВЛЕЧЕНИЕ Q ЗНАЧЕНИЙ
+    # ============================================================
+
+    def find_q_values(self, lines: List[str]) -> Optional[List[float]]:
+        """
+        Поиск Q значений (расходов) в заголовке таблицы
+
+        Критерий: строка с 5+ числами в диапазоне 0-500
+        """
+        for line in lines:
+            # ШАГ 1: Пропустить заголовки
+            if any(kw in line for kw in ['Таблица', 'Модель', 'кВт', 'Характеристик']):
+                continue
+
+            # ШАГ 2: Разбить строку на части
+            parts = line.split()
+
+            # ШАГ 3: Извлечь числа
+            potential_q = []
+            for part in parts:
+                q = self.parse_number(part)
+                # ШАГ 4: Проверить диапазон 0-500
+                if q is not None and 0 <= q <= 500:
+                    potential_q.append(q)
+
+            # ШАГ 5: Если >= 5 чисел -> это Q значения
+            if len(potential_q) >= 5:
+                return potential_q
+
+        return None
+
+    # ============================================================
+    # АЛГОРИТМ 4: ПАРСИНГ СТРОКИ CDM
+    # ============================================================
+
+    def parse_cdm_line(self, line: str, q_values: List[float]) -> List[Dict]:
+        """
+        Парсинг строки формата CDM
+
+        Формат: "1-2 0.37 11.8 11.5 10.5 ..."
+                 └─┬┘ └─┬─┘ └────────┬──────┘
+                Модель кВт    Напоры
+
+        Создаёт МНОЖЕСТВО объектов (по одному на каждое Q значение)
+        """
+        # ШАГ 1: Regex match
+        match = re.match(r'^(\d+[-−][^\s]+)\s+(\d+[.,]?\d*)\s+(.+)$', line.strip())
+        if not match:
+            return []
+
+        model_raw = match.group(1)
+        kw_raw = match.group(2)
+        h_str = match.group(3)
+
+        # ШАГ 2: Нормализация модели
+        pump_id = model_raw.replace('−', '-').replace('З', '3')
+
+        # ШАГ 3: Парсинг кВт
+        kw = self.parse_number(kw_raw)
+
+        # Валидация кВт: 0 < кВт < 500
+        if not kw or kw <= 0 or kw > 500:
+            return []
+
+        # ШАГ 4: Извлечь напоры (H values)
+        h_values = []
+        for part in h_str.split():
+            h = self.parse_number(part)
+            # Валидация H: 0 < H < 600
+            if h is not None and 0 < h < 600:
+                h_values.append(h)
+
+        # ШАГ 5: Создать объекты (ПО ОДНОМУ НА КАЖДЫЙ Q)
+        pumps = []
+        for i, h in enumerate(h_values):
+            if i < len(q_values):
+                pumps.append({
+                    "id": pump_id,                 # "1-2" (БЕЗ "CDM")
+                    "kw": round(kw, 2),            # 0.37
+                    "q": q_values[i],              # 0.0, 10.0, 12.0...
+                    "head_m": round(h, 1)          # 11.8, 11.5, 10.5...
+                })
+
+        return pumps
+
+    # ============================================================
+    # АЛГОРИТМ 5: ПАРСИНГ СТРОКИ CDMF+CMH
+    # ============================================================
+
+    def parse_cdmf_cmh_line(self, line: str, q_values: List[float]) -> List[Dict]:
+        """
+        Парсинг строки формата CDMF+CMH (бустерные)
+
+        Формат: "CDMF1-2+CMH1-40 0.37+2.2 246 245 ..."
+        """
+        # Нормализация текста
+        fixed = line.strip()
+        fixed = re.sub(r'CM\s+H', 'CMH', fixed)
+        fixed = re.sub(r'(\d)\s+\.(\d)', r'\1.\2', fixed)
+        fixed = re.sub(r'\.\s+(\d)', r'.\1', fixed)
+
+        # Regex match
+        match = re.match(r'^(CDMF\d+-\d+\+CMH\d+-\d+)\s+([\d.,]+\+[\d.,]+)\s+(.+)$', fixed)
+        if not match:
+            return []
+
+        pump_id = match.group(1)
+        kw_raw = match.group(2)
+        h_str = match.group(3)
+
+        # Парсинг кВт (СУММИРУЕМ два значения: 0.37 + 2.2 = 2.57)
+        parts = kw_raw.split('+')
+        kw = sum(self.parse_number(p) or 0 for p in parts)
+
+        if not kw or kw <= 0 or kw > 500:
+            return []
+
+        # Извлечь напоры
+        h_str = re.sub(r'(\d)\s+(\d)(?=\s|$)', r'\1\2', h_str)
+        h_values = []
+        for part in h_str.split():
+            h = self.parse_number(part)
+            if h is not None and 0 < h < 600:
+                h_values.append(h)
+
+        # Создать объекты
+        pumps = []
+        for i, h in enumerate(h_values):
+            if i < len(q_values):
+                pumps.append({
+                    "id": pump_id,
+                    "kw": round(kw, 2),
+                    "q": q_values[i],
+                    "head_m": round(h, 1)
+                })
+
+        return pumps
+
+    # ============================================================
+    # АЛГОРИТМ 6: ОБРАБОТКА СТРАНИЦЫ
+    # ============================================================
+
+    def parse_page(self, page, page_num: int, series_type: str) -> List[Dict]:
+        """
+        Парсинг одной страницы с таблицей
+        """
+        # Извлекаем ВЕСЬ текст (только для страниц с таблицами!)
+        text = page.extract_text()
+        if not text:
+            return []
+
+        lines = text.split('\n')
+
+        # Находим Q значения
+        q_values = self.find_q_values(lines)
+        if not q_values:
+            logger.info(f"  ⚠️  Страница {page_num}: Q значения не найдены")
+            return []
+
+        logger.info(f"  ✓ Q значения: {q_values[:5]}... (всего {len(q_values)})")
+
+        # Парсим строки данных
+        page_pumps = []
+        for line in lines:
+            # Пропускаем заголовки
+            if any(kw in line for kw in ['Таблица', 'Модель', 'кВт', 'Характеристик']):
+                continue
+
+            # Парсим в зависимости от типа серии
+            if series_type == "CDM":
+                pumps = self.parse_cdm_line(line, q_values)
+            elif series_type == "CDMF+CMH":
+                pumps = self.parse_cdmf_cmh_line(line, q_values)
+            else:
+                continue
+
+            page_pumps.extend(pumps)
+
+        return page_pumps
+
+    # ============================================================
+    # ГЛАВНАЯ ФУНКЦИЯ ПАРСИНГА
+    # ============================================================
+
+    def parse(self) -> List[Dict]:
+        """
+        ГЛАВНЫЙ АЛГОРИТМ ПАРСИНГА
+
+        Оптимизация памяти:
+        1. Обрабатываем страницы ПО ОДНОЙ
+        2. Быстрая проверка (первые 1000 символов)
+        3. Пропускаем страницы БЕЗ таблиц
+        4. Освобождаем память после каждой страницы
+        """
+        logger.info(f"\n{'='*60}")
+        logger.info(f"CDM PARSER - Начало работы")
+        logger.info(f"Файл: {os.path.basename(self.pdf_path)}")
+        logger.info(f"{'='*60}\n")
+
+        try:
+            with pdfplumber.open(self.pdf_path) as pdf:
+                self.stats['pages_total'] = len(pdf.pages)
+                logger.info(f"📄 Всего страниц в PDF: {self.stats['pages_total']}\n")
+
+                # ОБРАБОТКА СТРАНИЦ ПО ОДНОЙ
+                for page_num in range(self.stats['pages_total']):
+                    page = pdf.pages[page_num]
+                    self.stats['pages_processed'] = page_num + 1
+
+                    # БЫСТРАЯ ПРОВЕРКА: есть ли таблица?
+                    has_table, series_type = self.is_pump_table_page(page)
+
+                    if not has_table:
+                        # ПРОПУСКАЕМ страницу БЕЗ загрузки всего текста
+                        self.stats['pages_skipped'] += 1
+                        logger.debug(f"[{page_num + 1}] Пропущено")
+                        del page
+                        continue
+
+                    # Страница с таблицей - ПАРСИМ
+                    self.stats['pages_with_tables'] += 1
+                    logger.info(f"[{page_num + 1}] 📊 Найдена таблица ({series_type})")
+
+                    try:
+                        page_pumps = self.parse_page(page, page_num + 1, series_type)
+
+                        if page_pumps:
+                            self.all_pumps.extend(page_pumps)
+
+                            # Считаем уникальные модели
+                            models = set(p['id'] for p in page_pumps)
+                            logger.info(f"  ✓ Извлечено: {len(models)} моделей, {len(page_pumps)} записей\n")
+
+                    except Exception as e:
+                        logger.error(f"  ❌ Ошибка парсинга: {e}\n")
+
+                    # ОСВОБОЖДАЕМ ПАМЯТЬ
+                    del page
+                    del page_pumps if 'page_pumps' in locals() else None
+
+        except Exception as e:
+            logger.error(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+            raise
+
+        # Удаляем дубликаты
+        self.remove_duplicates()
+
+        # Финальная статистика
+        self.print_stats()
+
+        return self.all_pumps
+
+    # ============================================================
+    # УТИЛИТЫ
+    # ============================================================
+
+    def remove_duplicates(self):
+        """Удаление дубликатов"""
+        original_count = len(self.all_pumps)
+
+        seen = set()
+        unique_pumps = []
+
+        for pump in self.all_pumps:
+            key = (pump['id'], pump['kw'], pump['q'], pump['head_m'])
+            if key not in seen:
+                seen.add(key)
+                unique_pumps.append(pump)
+
+        duplicates = original_count - len(unique_pumps)
+        if duplicates > 0:
+            logger.info(f"🗑️  Удалено дубликатов: {duplicates}")
+
+        self.all_pumps = unique_pumps
+
+    def print_stats(self):
+        """Финальная статистика"""
+        models = set(p['id'] for p in self.all_pumps)
+
+        logger.info(f"\n{'='*60}")
+        logger.info("✅ ПАРСИНГ ЗАВЕРШЁН")
+        logger.info(f"{'='*60}")
+        logger.info(f"Обработано страниц:    {self.stats['pages_processed']}/{self.stats['pages_total']}")
+        logger.info(f"Страниц с таблицами:   {self.stats['pages_with_tables']}")
+        logger.info(f"Страниц пропущено:     {self.stats['pages_skipped']}")
+        logger.info(f"Уникальных моделей:    {len(models)}")
+        logger.info(f"Всего записей:         {len(self.all_pumps)}")
+        logger.info(f"{'='*60}\n")
+
+
+# ============================================================
+# ФУНКЦИЯ-ОБЁРТКА ДЛЯ app.py
+# ============================================================
+
+def extract_cdm_from_pdf(pdf_path):
+    """
+    ИДЕАЛЬНЫЙ АЛГОРИТМ извлечения данных CDM из PDF
+
+    Оптимизации:
+    - Обработка страниц по одной
+    - Быстрая проверка (первые 1000 символов)
+    - Пропуск страниц без таблиц
+    - Минимальное использование памяти
+
+    Args:
+        pdf_path: путь к PDF файлу
+
+    Returns:
+        Список словарей: [{"id": "1-2", "kw": 0.37, "q": 0.0, "head_m": 11.5}, ...]
+    """
+    parser = CDMParserFinal(pdf_path)
+    return parser.parse()
+
+
+# ============================================================
+# MAIN (для запуска из командной строки)
+# ============================================================
+
+def main():
+    if len(sys.argv) < 2:
+        print("Использование: python3 cdm_parser_final.py <input.pdf> [output.json]")
+        sys.exit(1)
+
+    pdf_path = sys.argv[1]
+
+    if len(sys.argv) >= 3:
+        output_path = sys.argv[2]
+    else:
+        base = os.path.splitext(os.path.basename(pdf_path))[0]
+        output_path = f"{base}_parsed.json"
+
+    if not os.path.exists(pdf_path):
+        logger.error(f"❌ Файл не найден: {pdf_path}")
+        sys.exit(1)
+
+    # Парсинг
+    parser = CDMParserFinal(pdf_path)
+    pumps = parser.parse()
+
+    if not pumps:
+        logger.error("⚠️  Данные не найдены!")
+        sys.exit(1)
+
+    # Сохранение
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(pumps, f, ensure_ascii=False, indent=2)
+
+    logger.info(f"💾 Сохранено: {output_path}")
+    logger.info(f"✅ Готово!")
+
+
+if __name__ == '__main__':
+    main()

@@ -1,0 +1,580 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CDM Pump Parser | Парсинг PDF насосов</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            border: 1px solid rgba(255, 152, 0, 0.2);
+        }
+
+        h1 {
+            font-size: 2.5em;
+            background: linear-gradient(135deg, #ff9800 0%, #ff6f00 100%);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 10px;
+        }
+
+        .subtitle {
+            color: #999;
+            font-size: 1.1em;
+        }
+
+        .stats-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+
+        .stat-card {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 20px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 152, 0, 0.2);
+        }
+
+        .stat-label {
+            font-size: 0.9em;
+            color: #999;
+            margin-bottom: 5px;
+        }
+
+        .stat-value {
+            font-size: 2em;
+            font-weight: bold;
+            color: #ff9800;
+        }
+
+        .upload-section {
+            background: rgba(255, 255, 255, 0.05);
+            border: 2px dashed #ff9800;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 30px;
+            cursor: pointer;
+            transition: all 0.3s ease;
+        }
+
+        .upload-section:hover {
+            background: rgba(255, 152, 0, 0.1);
+            border-color: #ff6f00;
+        }
+
+        .upload-section.dragover {
+            background: rgba(255, 152, 0, 0.15);
+            border-color: #ff9800;
+            transform: scale(1.02);
+        }
+
+        .upload-icon {
+            font-size: 4em;
+            margin-bottom: 20px;
+        }
+
+        .upload-text {
+            font-size: 1.2em;
+            color: #ccc;
+            margin-bottom: 10px;
+        }
+
+        .upload-hint {
+            font-size: 0.9em;
+            color: #666;
+        }
+
+        #file-input {
+            display: none;
+        }
+
+        .btn {
+            background: linear-gradient(135deg, #ff9800 0%, #ff6f00 100%);
+            color: white;
+            border: none;
+            padding: 12px 30px;
+            border-radius: 8px;
+            font-size: 1em;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            margin: 10px 5px;
+        }
+
+        .btn:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 5px 20px rgba(255, 152, 0, 0.4);
+        }
+
+        .btn:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-secondary {
+            background: rgba(255, 255, 255, 0.1);
+        }
+
+        .results-section {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 30px;
+            margin-top: 30px;
+            display: block;
+        }
+
+        .results-section.active {
+            display: block;
+        }
+
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .results-title {
+            font-size: 1.5em;
+            color: #ff9800;
+        }
+
+        .results-stats {
+            display: flex;
+            gap: 20px;
+        }
+
+        .results-stat {
+            text-align: center;
+        }
+
+        .results-stat-value {
+            font-size: 1.5em;
+            font-weight: bold;
+            color: #ff9800;
+        }
+
+        .results-stat-label {
+            font-size: 0.8em;
+            color: #999;
+        }
+
+        .table-container {
+            max-height: 500px;
+            overflow-y: auto;
+            margin-top: 20px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        thead {
+            position: sticky;
+            top: 0;
+            background: #2d2d2d;
+            z-index: 10;
+        }
+
+        th {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 2px solid #ff9800;
+            color: #ff9800;
+            font-weight: 600;
+        }
+
+        td {
+            padding: 10px 12px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        tr:hover {
+            background: rgba(255, 152, 0, 0.05);
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            font-size: 1.2em;
+            color: #ff9800;
+        }
+
+        .spinner {
+            border: 4px solid rgba(255, 255, 255, 0.1);
+            border-top: 4px solid #ff9800;
+            border-radius: 50%;
+            width: 40px;
+            height: 40px;
+            animation: spin 1s linear infinite;
+            margin: 20px auto;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .message {
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            text-align: center;
+        }
+
+        .message.success {
+            background: rgba(76, 175, 80, 0.2);
+            border: 1px solid #4caf50;
+            color: #4caf50;
+        }
+
+        .message.error {
+            background: rgba(244, 67, 54, 0.2);
+            border: 1px solid #f44336;
+            color: #f44336;
+        }
+
+        .actions {
+            text-align: center;
+            margin-top: 20px;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 40px;
+            padding: 20px;
+            color: #666;
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 CDM Pump Parser</h1>
+            <div class="subtitle">Парсинг PDF каталогов насосов CDM/CDMF для ONIS Bot</div>
+        </header>
+
+        <!-- Статистика базы данных -->
+        <div class="stats-bar">
+            <div class="stat-card">
+                <div class="stat-label">Всего записей</div>
+                <div class="stat-value" id="stat-total">{{ stats.total }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Уникальных моделей</div>
+                <div class="stat-value" id="stat-models">{{ stats.models }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Насосов CDM</div>
+                <div class="stat-value" id="stat-cdm">{{ stats.cdm_count }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Размер базы</div>
+                <div class="stat-value" id="stat-size">{{ stats.file_size_mb }} MB</div>
+            </div>
+        </div>
+
+        <!-- Секция загрузки -->
+        <div class="upload-section" id="upload-area">
+            <div class="upload-icon">📄</div>
+            <div class="upload-text">Перетащите PDF файл сюда</div>
+            <div class="upload-hint">или</div>
+            <button class="btn" onclick="document.getElementById('file-input').click()">
+                Выбрать файл
+            </button>
+            <input type="file" id="file-input" accept=".pdf">
+        </div>
+
+        <!-- Сообщения -->
+        <div id="message-container"></div>
+
+        <!-- Секция результатов -->
+        <div class="results-section" id="results-section">
+            <div class="results-header">
+                <div class="results-title">📊 Результаты парсинга</div>
+                <div class="results-stats">
+                    <div class="results-stat">
+                        <div class="results-stat-value" id="parsed-total">0</div>
+                        <div class="results-stat-label">Записей</div>
+                    </div>
+                    <div class="results-stat">
+                        <div class="results-stat-value" id="parsed-models">0</div>
+                        <div class="results-stat-label">Моделей</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <table id="results-table">
+                    <thead>
+                        <tr>
+                            <th>№</th>
+                            <th>ID модели</th>
+                            <th>кВт</th>
+                            <th>Q (м³/ч)</th>
+                            <th>H (м)</th>
+                        </tr>
+                    </thead>
+                    <tbody id="results-tbody">
+                        <tr id="placeholder-row">
+                            <td colspan="5" style="text-align: center; padding: 40px; color: #666;">
+                                <div style="font-size: 3em; margin-bottom: 10px;">📄</div>
+                                <div style="font-size: 1.2em;">Загрузите PDF файл для начала парсинга</div>
+                                <div style="font-size: 0.9em; margin-top: 10px; color: #888;">Результаты появятся здесь автоматически</div>
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="actions">
+                <button class="btn" id="merge-btn" onclick="mergeToDatabase()">
+                    ✅ Загрузить в базу ONIS Bot
+                </button>
+                <button class="btn btn-secondary" onclick="downloadJSON()">
+                    💾 Скачать JSON
+                </button>
+                <button class="btn btn-secondary" onclick="resetParser()">
+                    🔄 Новый файл
+                </button>
+            </div>
+        </div>
+
+        <footer>
+            <div>CDM Pump Parser v1.0 | Создано для ONIS Bot</div>
+            <div>Последнее обновление базы: {{ stats.last_modified or 'Никогда' }}</div>
+        </footer>
+    </div>
+
+    <script>
+        let parsedData = null;
+
+        // Drag & Drop
+        const uploadArea = document.getElementById('upload-area');
+        const fileInput = document.getElementById('file-input');
+
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            uploadArea.addEventListener(eventName, preventDefaults, false);
+        });
+
+        function preventDefaults(e) {
+            e.preventDefault();
+            e.stopPropagation();
+        }
+
+        ['dragenter', 'dragover'].forEach(eventName => {
+            uploadArea.addEventListener(eventName, () => {
+                uploadArea.classList.add('dragover');
+            });
+        });
+
+        ['dragleave', 'drop'].forEach(eventName => {
+            uploadArea.addEventListener(eventName, () => {
+                uploadArea.classList.remove('dragover');
+            });
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        function handleFile(file) {
+            if (!file.name.toLowerCase().endsWith('.pdf')) {
+                showMessage('Пожалуйста, выберите PDF файл', 'error');
+                return;
+            }
+
+            showMessage('Парсинг PDF... Это может занять некоторое время', 'success');
+            showLoading(true);
+
+            const formData = new FormData();
+            formData.append('file', file);
+
+            fetch('/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                showLoading(false);
+                if (data.error) {
+                    showMessage(data.error, 'error');
+                } else {
+                    parsedData = data.data;
+                    displayResults(data);
+                    showMessage(`✅ Успешно! Извлечено ${data.stats.total} записей`, 'success');
+                }
+            })
+            .catch(error => {
+                showLoading(false);
+                showMessage('Ошибка загрузки: ' + error.message, 'error');
+            });
+        }
+
+        function displayResults(data) {
+            document.getElementById('parsed-total').textContent = data.stats.total;
+            document.getElementById('parsed-models').textContent = data.stats.models;
+
+            const tbody = document.getElementById('results-tbody');
+            // Удаляем placeholder если есть
+            const placeholder = document.getElementById('placeholder-row');
+            if (placeholder) placeholder.remove();
+            tbody.innerHTML = '';
+
+            data.data.forEach((pump, index) => {
+                const row = tbody.insertRow();
+                row.innerHTML = `
+                    <td>${index + 1}</td>
+                    <td><strong>${pump.id}</strong></td>
+                    <td>${pump.kw}</td>
+                    <td>${pump.q}</td>
+                    <td>${pump.head_m}</td>
+                `;
+            });
+
+            document.getElementById('results-section').classList.add('active');
+        });
+                    showMessage(`✅ Загружено из истории: ${history[index].date}`, 'success');
+                }
+            } catch (e) {
+                showMessage('Ошибка загрузки: ' + e.message, 'error');
+            }
+        }
+
+        function mergeToDatabase() {
+            if (!parsedData) {
+                showMessage('Нет данных для загрузки', 'error');
+                return;
+            }
+
+            const btn = document.getElementById('merge-btn');
+            btn.disabled = true;
+            btn.textContent = '⏳ Загрузка...';
+
+            fetch('/merge', {
+                method: 'POST'
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.error) {
+                    showMessage(data.error, 'error');
+                    btn.disabled = false;
+                    btn.textContent = '✅ Загрузить в базу ONIS Bot';
+                } else {
+                    showMessage(data.message, 'success');
+                    updateStats();
+                    setTimeout(() => {
+                        resetParser();
+                    }, 2000);
+                }
+            })
+            .catch(error => {
+                showMessage('Ошибка загрузки в базу: ' + error.message, 'error');
+                btn.disabled = false;
+                btn.textContent = '✅ Загрузить в базу ONIS Bot';
+            });
+        }
+
+        function downloadJSON() {
+            if (!parsedData || parsedData.length === 0) {
+                showMessage('Нет данных для скачивания', 'error');
+                return;
+            }
+
+            // Создаём blob с JSON данными
+            const jsonStr = JSON.stringify(parsedData, null, 2);
+            const blob = new Blob([jsonStr], { type: 'application/json' });
+
+            // Создаём ссылку для скачивания
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+
+            // Генерируем имя файла с датой
+            const date = new Date().toISOString().split('T')[0];
+            const timestamp = new Date().toTimeString().split(' ')[0].replace(/:/g, '-');
+            a.download = `cdm_parsed_${date}_${timestamp}.json`;
+
+            // Триггерим скачивание
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            window.URL.revokeObjectURL(url);
+
+            showMessage('✅ JSON файл скачан!', 'success');
+        }
+
+        function resetParser() {
+            parsedData = null;
+            document.getElementById('results-section').classList.remove('active');
+            document.getElementById('file-input').value = '';
+            document.getElementById('message-container').innerHTML = '';
+            const btn = document.getElementById('merge-btn');
+            btn.disabled = false;
+            btn.textContent = '✅ Загрузить в базу ONIS Bot';
+        }
+
+        function updateStats() {
+            fetch('/stats')
+                .then(response => response.json())
+                .then(stats => {
+                    document.getElementById('stat-total').textContent = stats.total;
+                    document.getElementById('stat-models').textContent = stats.models;
+                    document.getElementById('stat-cdm').textContent = stats.cdm_count;
+                    document.getElementById('stat-size').textContent = stats.file_size_mb + ' MB';
+                });
+        }
+
+        function showMessage(message, type) {
+            const container = document.getElementById('message-container');
+            container.innerHTML = `<div class="message ${type}">${message}</div>`;
+        }
+
+        function showLoading(show) {
+            const container = document.getElementById('message-container');
+            if (show) {
+                container.innerHTML = '<div class="loading"><div class="spinner"></div>Парсинг PDF...</div>';
+            }
+        }
+
+        // Обновление статистики каждые 30 секунд
+        setInterval(updateStats, 30000);
+    </script>
+</body>
+</html>

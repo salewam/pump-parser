@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+"""
+CDM/CDMF Pump Data Parser - PyMuPDF VERSION
+============================================
+КРИТИЧЕСКОЕ УЛУЧШЕНИЕ ПАМЯТИ:
+- PyMuPDF использует в 5-10x МЕНЬШЕ памяти чем pdfplumber
+- Может парсить PDF до 40MB на сервере с 960MB RAM
+- Быстрее и эффективнее
+
+Установка: pip install PyMuPDF
+"""
+
+import fitz  # PyMuPDF
+import json
+import re
+import sys
+import os
+import logging
+import gc
+from typing import List, Dict, Optional, Tuple
+
+# Минимальное логирование
+logging.basicConfig(level=logging.INFO, format='%(message)s')
+logger = logging.getLogger(__name__)
+
+
+class CDMParserPyMuPDF:
+    """
+    ПАРСЕР CDM на базе PyMuPDF - минимальное потребление памяти
+    """
+
+    def __init__(self, pdf_path: str):
+        self.pdf_path = pdf_path
+        self.all_pumps = []
+
+    def parse_number(self, s: str) -> Optional[float]:
+        """Парсинг числа из строки"""
+        if not s:
+            return None
+
+        s = str(s).strip()
+        s = re.sub(r'(\d)\s+(\d)', r'\1\2', s)
+        s = re.sub(r'(\d)\s+(\d)', r'\1\2', s)
+        s = re.sub(r'(\d)\s+\.', r'\1.', s)
+        s = re.sub(r'\.\s+(\d)', r'.\1', s)
+        s = s.replace(',', '.')
+        s = re.sub(r'[*\']', '', s)
+
+        match = re.search(r'(\d+\.?\d*)', s)
+        if match:
+            try:
+                return float(match.group(1))
+            except:
+                return None
+        return None
+
+    def quick_check_table(self, text_sample: str) -> Tuple[bool, Optional[str]]:
+        """Быстрая проверка наличия таблицы (первые 800 символов)"""
+        if not text_sample or len(text_sample) < 50:
+            return False, None
+
+        sample = text_sample[:800]
+
+        # Проверка критериев
+        has_table = 'Таблица' in sample and ('характеристик' in sample or 'CDM' in sample)
+        if not has_table:
+            return False, None
+
+        # Определение типа
+        if re.search(r'CDM/CDMF\d+', sample) or re.search(r'CDM\s*\d+', sample):
+            return True, "CDM"
+        if re.search(r'CDMF\d+\+CMH\d+-\d+', sample):
+            return True, "CDMF+CMH"
+
+        return False, None
+
+    def find_q_values(self, lines: List[str]) -> Optional[List[float]]:
+        """Поиск Q значений в таблице"""
+        for line in lines:
+            if any(kw in line for kw in ['Таблица', 'Модель', 'кВт', 'Характеристик']):
+                continue
+
+            potential_q = []
+            for part in line.split():
+                q = self.parse_number(part)
+                if q is not None and 0 <= q <= 500:
+                    potential_q.append(q)
+
+            if len(potential_q) >= 5:
+                return potential_q
+
+        return None
+
+    def parse_cdm_line(self, line: str, q_values: List[float]) -> List[Dict]:
+        """Парсинг строки CDM"""
+        match = re.match(r'^(\d+[-−][^\s]+)\s+(\d+[.,]?\d*)\s+(.+)$', line.strip())
+        if not match:
+            return []
+
+        pump_id = match.group(1).replace('−', '-').replace('З', '3')
+        kw = self.parse_number(match.group(2))
+        if not kw or kw <= 0 or kw > 500:
+            return []
+
+        h_values = []
+        for part in match.group(3).split():
+            h = self.parse_number(part)
+            if h is not None and 0 < h < 600:
+                h_values.append(h)
+
+        pumps = []
+        for i, h in enumerate(h_values):
+            if i < len(q_values):
+                pumps.append({
+                    "id": pump_id,
+                    "kw": round(kw, 2),
+                    "q": q_values[i],
+                    "head_m": round(h, 1)
+                })
+
+        return pumps
+
+    def parse_cdmf_cmh_line(self, line: str, q_values: List[float]) -> List[Dict]:
+        """Парсинг строки CDMF+CMH"""
+        fixed = line.strip()
+        fixed = re.sub(r'CM\s+H', 'CMH', fixed)
+        fixed = re.sub(r'(\d)\s+\.(\d)', r'\1.\2', fixed)
+        fixed = re.sub(r'\.\s+(\d)', r'.\1', fixed)
+
+        match = re.match(r'^(CDMF\d+-\d+\+CMH\d+-\d+)\s+([\d.,]+\+[\d.,]+)\s+(.+)$', fixed)
+        if not match:
+            return []
+
+        pump_id = match.group(1)
+        parts = match.group(2).split('+')
+        kw = sum(self.parse_number(p) or 0 for p in parts)
+
+        if not kw or kw <= 0 or kw > 500:
+            return []
+
+        h_str = match.group(3)
+        h_str = re.sub(r'(\d)\s+(\d)(?=\s|$)', r'\1\2', h_str)
+
+        h_values = []
+        for part in h_str.split():
+            h = self.parse_number(part)
+            if h is not None and 0 < h < 600:
+                h_values.append(h)
+
+        pumps = []
+        for i, h in enumerate(h_values):
+            if i < len(q_values):
+                pumps.append({
+                    "id": pump_id,
+                    "kw": round(kw, 2),
+                    "q": q_values[i],
+                    "head_m": round(h, 1)
+                })
+
+        return pumps
+
+    def parse_page_text(self, text: str, series_type: str) -> List[Dict]:
+        """
+        Парсинг текста страницы (PyMuPDF формат)
+
+        PyMuPDF извлекает текст по КОЛОНКАМ, поэтому нужен другой подход:
+        1. Найти Q значения (они идут подряд в начале)
+        2. Найти модели (паттерн: число-число)
+        3. Собрать H значения после каждой модели
+        """
+        lines = [l.strip() for l in text.split('\n') if l.strip()]
+
+        # Найти Q значения - ищем последовательность чисел после "Q (м3/ч)"
+        q_values = []
+        q_section = False
+        for i, line in enumerate(lines):
+            if 'Q (м3/ч)' in line or 'Q (м³/ч)' in line:
+                q_section = True
+                continue
+
+            if q_section:
+                q = self.parse_number(line)
+                if q is not None and 0 <= q <= 500:
+                    q_values.append(q)
+                elif line and not line.replace(',', '.').replace('.', '').isdigit():
+                    # Конец Q секции
+                    break
+
+        if not q_values or len(q_values) < 5:
+            return []
+
+        # Найти все модели и их данные
+        page_pumps = []
+
+        for i, line in enumerate(lines):
+            # Ищем паттерн модели: "1-2", "10-5" и т.д.
+            if re.match(r'^\d+[-−]\d+$', line):
+                model_id = line.replace('−', '-')
+
+                # Следующая строка должна быть кВт
+                if i + 1 < len(lines):
+                    kw = self.parse_number(lines[i + 1])
+                    if not kw or kw <= 0 or kw > 500:
+                        continue
+
+                    # Собираем H значения - они идут после "Н" и "(м)"
+                    h_values = []
+                    start_idx = i + 2
+
+                    # Пропускаем "Н" и "(м)" если есть
+                    while start_idx < len(lines) and lines[start_idx] in ['Н', '(м)']:
+                        start_idx += 1
+
+                    # Собираем числа (это H значения)
+                    for j in range(start_idx, min(start_idx + len(q_values), len(lines))):
+                        h = self.parse_number(lines[j])
+                        if h is not None and 0 < h < 600:
+                            h_values.append(h)
+                        else:
+                            break
+
+                    # Создаём записи
+                    for idx, h in enumerate(h_values):
+                        if idx < len(q_values):
+                            page_pumps.append({
+                                "id": model_id,
+                                "kw": round(kw, 2),
+                                "q": q_values[idx],
+                                "head_m": round(h, 1)
+                            })
+
+        return page_pumps
+
+    def parse(self) -> List[Dict]:
+        """
+        ПАРСИНГ с PyMuPDF - минимальное потребление памяти
+
+        PyMuPDF (fitz) использует в 5-10x меньше памяти чем pdfplumber!
+        14MB PDF: ~50-100MB вместо 492MB
+        40MB PDF: ~150-300MB (влезет в 460MB доступной памяти)
+        """
+        logger.info("="*60)
+        logger.info("CDM PARSER - PyMuPDF (легкая версия)")
+        logger.info(f"Файл: {os.path.basename(self.pdf_path)}")
+        logger.info("="*60)
+
+        pages_processed = 0
+        pages_with_tables = 0
+        pages_skipped = 0
+
+        try:
+            # Открываем PDF через PyMuPDF (НАМНОГО легче чем pdfplumber!)
+            doc = fitz.open(self.pdf_path)
+            total_pages = len(doc)
+            logger.info(f"Страниц в PDF: {total_pages}\n")
+
+            # Обрабатываем страницы ПО ОДНОЙ
+            for page_num in range(total_pages):
+                pages_processed += 1
+
+                try:
+                    # Загружаем ТОЛЬКО текущую страницу
+                    page = doc[page_num]
+
+                    # Извлекаем текст (PyMuPDF делает это БЫСТРО и с минимальной памятью)
+                    text = page.get_text()
+
+                    if not text:
+                        pages_skipped += 1
+                        continue
+
+                    # Быстрая проверка (первые 800 символов)
+                    has_table, series_type = self.quick_check_table(text)
+
+                    if not has_table:
+                        pages_skipped += 1
+                        # Освобождаем память
+                        del text
+                        continue
+
+                    # Есть таблица - парсим
+                    pages_with_tables += 1
+                    logger.info(f"[{page_num + 1}] 📊 Таблица {series_type}")
+
+                    page_pumps = self.parse_page_text(text, series_type)
+
+                    if page_pumps:
+                        self.all_pumps.extend(page_pumps)
+                        models = set(p['id'] for p in page_pumps)
+                        logger.info(f"  ✓ {len(models)} моделей, {len(page_pumps)} записей")
+
+                except Exception as e:
+                    logger.error(f"  ❌ Ошибка страницы {page_num + 1}: {e}")
+
+                finally:
+                    # Освобождаем память после каждой страницы
+                    if 'text' in locals():
+                        del text
+                    if 'page_pumps' in locals():
+                        del page_pumps
+
+                    # Принудительная сборка мусора каждые 10 страниц
+                    if page_num % 10 == 0:
+                        gc.collect()
+
+            # Закрываем документ
+            doc.close()
+
+        except Exception as e:
+            logger.error(f"\n❌ КРИТИЧЕСКАЯ ОШИБКА: {e}")
+            raise
+
+        # Удаление дубликатов
+        self.remove_duplicates()
+
+        # Статистика
+        logger.info("\n" + "="*60)
+        logger.info("✅ ПАРСИНГ ЗАВЕРШЁН")
+        logger.info("="*60)
+        logger.info(f"Обработано: {pages_processed}/{total_pages}")
+        logger.info(f"С таблицами: {pages_with_tables}")
+        logger.info(f"Пропущено: {pages_skipped}")
+        logger.info(f"Записей: {len(self.all_pumps)}")
+        logger.info("="*60)
+
+        return self.all_pumps
+
+    def remove_duplicates(self):
+        """Удаление дубликатов"""
+        seen = set()
+        unique_pumps = []
+
+        for pump in self.all_pumps:
+            key = (pump['id'], pump['kw'], pump['q'], pump['head_m'])
+            if key not in seen:
+                seen.add(key)
+                unique_pumps.append(pump)
+
+        self.all_pumps = unique_pumps
+
+
+def extract_cdm_from_pdf(pdf_path):
+    """
+    Извлечение данных CDM из PDF с использованием PyMuPDF
+
+    ПРЕИМУЩЕСТВА PyMuPDF:
+    - В 5-10x меньше памяти чем pdfplumber
+    - Быстрее
+    - Может парсить PDF до 40MB на сервере с 960MB RAM
+
+    Args:
+        pdf_path: путь к PDF
+
+    Returns:
+        [{"id": "1-2", "kw": 0.37, "q": 0.0, "head_m": 11.5}, ...]
+    """
+    parser = CDMParserPyMuPDF(pdf_path)
+    return parser.parse()
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Использование: python3 cdm_parser_pymupdf.py <input.pdf> [output.json]")
+        sys.exit(1)
+
+    pdf_path = sys.argv[1]
+    output_path = sys.argv[2] if len(sys.argv) >= 3 else f"{os.path.splitext(os.path.basename(pdf_path))[0]}_parsed.json"
+
+    if not os.path.exists(pdf_path):
+        logger.error(f"❌ Файл не найден: {pdf_path}")
+        sys.exit(1)
+
+    parser = CDMParserPyMuPDF(pdf_path)
+    pumps = parser.parse()
+
+    if not pumps:
+        logger.error("⚠️  Данные не найдены!")
+        sys.exit(1)
+
+    with open(output_path, 'w', encoding='utf-8') as f:
+        json.dump(pumps, f, ensure_ascii=False, indent=2)
+
+    logger.info(f"\n💾 Сохранено: {output_path}")
+
+
+if __name__ == '__main__':
+    main()

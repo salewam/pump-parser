@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CDM Pump Parser</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
+            color: #e0e0e0;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container { max-width: 1200px; margin: 0 auto; }
+        header {
+            text-align: center;
+            margin-bottom: 40px;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+        }
+        h1 { font-size: 2.5em; color: #ff9800; margin-bottom: 10px; }
+        .subtitle { color: #999; font-size: 1.1em; }
+        .stats-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 30px;
+        }
+        .stat-card {
+            background: rgba(255, 255, 255, 0.05);
+            padding: 20px;
+            border-radius: 10px;
+            border: 1px solid rgba(255, 152, 0, 0.2);
+            text-align: center;
+        }
+        .stat-label { font-size: 0.9em; color: #999; margin-bottom: 5px; }
+        .stat-value { font-size: 2em; font-weight: bold; color: #ff9800; }
+        .upload-section {
+            background: rgba(255, 255, 255, 0.05);
+            border: 2px solid #ff9800;
+            border-radius: 12px;
+            padding: 40px;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .upload-section h2 { color: #ff9800; margin-bottom: 20px; font-size: 1.5em; }
+        input[type="file"] {
+            display: block;
+            margin: 20px auto;
+            padding: 10px;
+            background: rgba(255, 255, 255, 0.1);
+            border: 2px solid #ff9800;
+            border-radius: 8px;
+            color: #fff;
+            font-size: 1em;
+            cursor: pointer;
+            max-width: 400px;
+        }
+        input[type="file"]::file-selector-button {
+            background: linear-gradient(135deg, #ff9800 0%, #ff6f00 100%);
+            color: white;
+            border: none;
+            padding: 10px 20px;
+            border-radius: 6px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        .btn {
+            background: linear-gradient(135deg, #ff9800 0%, #ff6f00 100%);
+            color: white;
+            border: none;
+            padding: 15px 40px;
+            border-radius: 8px;
+            font-size: 1.1em;
+            cursor: pointer;
+            margin: 10px 5px;
+            text-decoration: none;
+            display: inline-block;
+            transition: transform 0.2s;
+        }
+        .btn:hover { transform: translateY(-2px); }
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+        .btn-secondary { background: rgba(255, 255, 255, 0.1); }
+        .message {
+            padding: 15px 20px;
+            border-radius: 8px;
+            margin: 20px 0;
+            text-align: center;
+            font-size: 1.1em;
+        }
+        .message.success {
+            background: rgba(76, 175, 80, 0.2);
+            border: 1px solid #4caf50;
+            color: #4caf50;
+        }
+        .message.error {
+            background: rgba(244, 67, 54, 0.2);
+            border: 1px solid #f44336;
+            color: #f44336;
+        }
+        .progress-container {
+            display: none;
+            margin: 30px auto;
+            max-width: 500px;
+        }
+        .progress-container.active { display: block; }
+        .progress-bar-wrapper {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+            height: 30px;
+            overflow: hidden;
+            position: relative;
+        }
+        .progress-bar {
+            background: linear-gradient(135deg, #ff9800 0%, #ff6f00 100%);
+            height: 100%;
+            width: 0%;
+            transition: width 0.3s ease;
+            border-radius: 10px;
+        }
+        .progress-text {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            font-weight: bold;
+            color: #fff;
+            text-shadow: 1px 1px 2px rgba(0,0,0,0.5);
+        }
+        .progress-status {
+            text-align: center;
+            margin-top: 15px;
+            color: #ff9800;
+            font-size: 1.1em;
+        }
+        .results-section {
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 12px;
+            padding: 30px;
+            margin-top: 30px;
+        }
+        .results-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+            flex-wrap: wrap;
+            gap: 20px;
+        }
+        .results-title { font-size: 1.5em; color: #ff9800; }
+        .results-stats { display: flex; gap: 20px; }
+        .results-stat-value { font-size: 1.5em; font-weight: bold; color: #ff9800; }
+        .results-stat-label { font-size: 0.8em; color: #999; }
+        .table-container { max-height: 500px; overflow-y: auto; margin-top: 20px; }
+        table { width: 100%; border-collapse: collapse; }
+        thead { position: sticky; top: 0; background: #2d2d2d; }
+        th {
+            padding: 12px;
+            text-align: left;
+            border-bottom: 2px solid #ff9800;
+            color: #ff9800;
+            font-weight: 600;
+        }
+        td { padding: 10px 12px; border-bottom: 1px solid rgba(255, 255, 255, 0.1); }
+        tr:hover { background: rgba(255, 152, 0, 0.05); }
+        .actions { text-align: center; margin-top: 20px; }
+        footer { text-align: center; margin-top: 40px; padding: 20px; color: #666; font-size: 0.9em; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>CDM Pump Parser</h1>
+            <div class="subtitle">Parser V19 - 371 Models</div>
+        </header>
+
+        <div class="stats-bar">
+            <div class="stat-card">
+                <div class="stat-label">Vsego zapisey</div>
+                <div class="stat-value">{{ stats.total }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Modeley</div>
+                <div class="stat-value">{{ stats.models }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">CDM nasosov</div>
+                <div class="stat-value">{{ stats.cdm_count }}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Razmer bazy</div>
+                <div class="stat-value">{{ stats.file_size_mb }} MB</div>
+            </div>
+        </div>
+
+        {% with messages = get_flashed_messages(with_categories=true) %}
+            {% if messages %}
+                {% for category, message in messages %}
+                    <div class="message {{ category }}">{{ message }}</div>
+                {% endfor %}
+            {% endif %}
+        {% endwith %}
+
+        {% if not parsed_data %}
+        <div class="upload-section">
+            <h2>Zagruzite PDF fayl</h2>
+            <form id="uploadForm" method="POST" action="/upload" enctype="multipart/form-data">
+                <input type="file" id="fileInput" name="file" accept=".pdf" required>
+                <br>
+                <button type="submit" id="submitBtn" class="btn">Nachat parsing</button>
+            </form>
+            <div id="progressContainer" class="progress-container">
+                <div class="progress-bar-wrapper">
+                    <div id="progressBar" class="progress-bar"></div>
+                    <div id="progressText" class="progress-text">0%</div>
+                </div>
+                <div id="progressStatus" class="progress-status">Podgotovka...</div>
+            </div>
+        </div>
+        <script>
+            const form = document.getElementById('uploadForm');
+            const fileInput = document.getElementById('fileInput');
+            const submitBtn = document.getElementById('submitBtn');
+            const progressContainer = document.getElementById('progressContainer');
+            const progressBar = document.getElementById('progressBar');
+            const progressText = document.getElementById('progressText');
+            const progressStatus = document.getElementById('progressStatus');
+
+            form.addEventListener('submit', function(e) {
+                e.preventDefault();
+                const file = fileInput.files[0];
+                if (!file) { alert('Vyberi PDF fayl'); return; }
+
+                progressContainer.classList.add('active');
+                submitBtn.disabled = true;
+                submitBtn.textContent = 'Zagruzka...';
+
+                const formData = new FormData();
+                formData.append('file', file);
+                const xhr = new XMLHttpRequest();
+
+                xhr.upload.addEventListener('progress', function(e) {
+                    if (e.lengthComputable) {
+                        const pct = Math.round((e.loaded / e.total) * 50);
+                        progressBar.style.width = pct + '%';
+                        progressText.textContent = pct + '%';
+                        const mb = Math.round(e.loaded / 1024 / 1024 * 10) / 10;
+                        progressStatus.textContent = 'Zagruzka: ' + mb + ' MB';
+                    }
+                });
+
+                xhr.upload.addEventListener('load', function() {
+                    progressBar.style.width = '50%';
+                    progressText.textContent = '50%';
+                    progressStatus.textContent = 'Parsing PDF...';
+                    let p = 50;
+                    xhr.parseInterval = setInterval(function() {
+                        if (p < 95) {
+                            p += Math.random() * 5;
+                            if (p > 95) p = 95;
+                            progressBar.style.width = p + '%';
+                            progressText.textContent = Math.round(p) + '%';
+                        }
+                    }, 200);
+                });
+
+                xhr.addEventListener('load', function() {
+                    if (xhr.parseInterval) clearInterval(xhr.parseInterval);
+                    progressBar.style.width = '100%';
+                    progressText.textContent = '100%';
+                    progressStatus.textContent = 'Gotovo!';
+                    setTimeout(function() { window.location.href = '/'; }, 500);
+                });
+
+                xhr.addEventListener('error', function() {
+                    if (xhr.parseInterval) clearInterval(xhr.parseInterval);
+                    progressStatus.textContent = 'Oshibka!';
+                    submitBtn.disabled = false;
+                    submitBtn.textContent = 'Nachat parsing';
+                });
+
+                xhr.open('POST', '/upload');
+                xhr.send(formData);
+            });
+        </script>
+        {% endif %}
+
+        {% if parsed_data %}
+        <div class="results-section">
+            <div class="results-header">
+                <div class="results-title">Resultaty</div>
+                <div class="results-stats">
+                    <div>
+                        <div class="results-stat-value">{{ parsed_stats.total }}</div>
+                        <div class="results-stat-label">Zapisey</div>
+                    </div>
+                    <div>
+                        <div class="results-stat-value">{{ parsed_stats.models }}</div>
+                        <div class="results-stat-label">Modeley</div>
+                    </div>
+                </div>
+            </div>
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr><th>#</th><th>ID</th><th>kW</th><th>Q</th><th>H</th></tr>
+                    </thead>
+                    <tbody>
+                        {% for pump in parsed_data %}
+                        <tr>
+                            <td>{{ loop.index }}</td>
+                            <td><strong>{{ pump.id }}</strong></td>
+                            <td>{{ pump.kw }}</td>
+                            <td>{{ pump.q }}</td>
+                            <td>{{ pump.head_m }}</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+            <div class="actions">
+                <form method="POST" action="/merge" style="display: inline;">
+                    <button type="submit" class="btn">V bazu ONIS Bot</button>
+                </form>
+                <form method="GET" action="/download" style="display: inline;">
+                    <button type="submit" class="btn btn-secondary">Skachat JSON</button>
+                </form>
+                <a href="/reset" class="btn btn-secondary">Novyi PDF</a>
+            </div>
+        </div>
+        {% endif %}
+
+        <footer>
+            <div>CDM Pump Parser V19</div>
+            <div>{{ stats.last_modified or '' }}</div>
+        </footer>
+    </div>
+</body>
+</html>
