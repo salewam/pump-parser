@@ -181,12 +181,17 @@ class PipelineOrchestrator:
                     if pumps:
                         for p in pumps:
                             name = str(p.get("model", "")).strip()
-                            # Filter: must be real pump model name (not just a number or 2-letter code)
+                            # Filter: must be real pump model name
                             if not name or len(name) < 5 or name.isdigit():
+                                continue
+                            from config import KNOWN_SERIES
+                            series = detect_series(name)
+                            # Must have series in KNOWN_SERIES, or be long enough to be real model
+                            if series.upper() not in KNOWN_SERIES and len(name) < 10:
                                 continue
                             result.models.append(PumpModelResult(
                                 model=name,
-                                series=detect_series(name),
+                                series=series,
                                 q=float(p.get("q_nom", 0) or 0),
                                 h=float(p.get("h_nom", 0) or 0),
                                 kw=float(p.get("power_kw", 0) or 0),
@@ -259,17 +264,37 @@ class PipelineOrchestrator:
 
         logger.info("Merge: filled %d H values via Q+kW+stages matching", filled)
 
-        # Also try exact key match for any remaining
+        # Try exact key match for remaining
         seen = set()
+        # Build H lookup from already-filled models: model_base → H
+        h_lookup = {}  # "CMI1-20" → 18.0
+        for dm in docling.models:
+            if dm.h > 0:
+                # Strip T/variant suffix: "CMI 1-20T-BQCE" → "CMI1-20"
+                base = re.sub(r'T?-?BQCE$', '', dm.model.upper().replace(' ', ''))
+                h_lookup[base] = dm.h
+
         for dm in docling.models:
             if not dm.h:
+                # Try exact VLM match
                 vm = vlm_map.get(dm.key)
                 if vm and vm.h:
                     dm.h = vm.h
                     dm.confidence_h = 0.5
                     dm.source_h = "vlm"
+                    filled += 1
+                else:
+                    # Try T-variant: copy H from non-T model with same base name
+                    base = re.sub(r'T?-?BQCE$', '', dm.model.upper().replace(' ', ''))
+                    if base in h_lookup:
+                        dm.h = h_lookup[base]
+                        dm.confidence_h = 0.4
+                        dm.source_h = "vlm_variant"
+                        filled += 1
             merged.models.append(dm)
             seen.add(dm.key)
+
+        logger.info("Merge total: %d H values filled", filled)
 
         # Add VLM-only models
         for vm in vlm.models:
