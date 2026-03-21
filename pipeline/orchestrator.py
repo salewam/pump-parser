@@ -150,23 +150,14 @@ class PipelineOrchestrator:
                     pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(1.5, 1.5))
                     b64 = base64.b64encode(pix.tobytes("png")).decode()
 
-                    # Build context with known model names from Docling
                     task = "extract_pumps"
-                    context = ""
-                    if docling_result.models:
-                        names = list(set(m.model for m in docling_result.models[:20]))
-                        context = ("Известные модели из этого каталога: " + ", ".join(names[:10]) +
-                                   ". Используй ПОЛНЫЕ названия моделей (например CMI 1-20-BQCE, не CM 1).")
 
                     # Retry loop: Ollama needs time to load model (~30-60s)
                     d = None
                     for attempt in range(6 if not ollama_ready else 1):
-                        post_data = {"image": b64, "task": task}
-                        if context:
-                            post_data["context"] = context
                         r = requests.post(
                             f"http://{GPU_HOST}:8000/analyze",
-                            data=post_data,
+                            data={"image": b64, "task": task},
                             timeout=300,
                         )
                         if r.status_code != 200:
