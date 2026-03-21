@@ -192,6 +192,7 @@ def normalize_model_key(name):
                      ("\u0420", "P"), ("\u0422", "T"), ("\u0410", "A")]:
         k = k.replace(cyr, lat)
     k = k.replace("\u200b", "").replace("\u200c", "").replace("\ufeff", "")
+    k = k.replace(",", ".")  # normalize comma decimal
     k = k.replace("\u2013", "-").replace("\u2014", "-").replace("\u2012", "-")
     return k
 
