@@ -14,7 +14,7 @@ from pipeline.stage_ocr import OCRStage
 from pipeline.stage_selfcorrect import SelfCorrectionStage
 from pipeline.confidence import ConfidenceScorer
 from brand_qualifier import BrandQualifier
-from gpu_manager import stop_docling, start_docling, warmup_ollama
+from gpu_manager import stop_docling, start_docling
 
 logger = logging.getLogger(__name__)
 
@@ -58,8 +58,7 @@ class PipelineOrchestrator:
         # ── Stage 2: VLM ────────────────────────────────────────────
         _progress("VLM: освобождение GPU...", 30)
         logger.info("Stage 2: stopping Docling to free VRAM for VLM")
-        stop_docling()
-        warmup_ollama()
+        stop_docling()  # includes VLM warmup
 
         _progress("VLM: валидация и дополнение...", 35)
         logger.info("Stage 2: VLM starting")
@@ -70,9 +69,6 @@ class PipelineOrchestrator:
         except Exception as e:
             logger.error("Stage 2 VLM error: %s", e)
             vlm_result.errors.append(str(e))
-        finally:
-            _progress("Перезапуск Docling...", 50)
-            start_docling()
 
         logger.info("Stage 2 done: %d models, errors=%s",
                      len(vlm_result.models), vlm_result.errors)
@@ -81,8 +77,8 @@ class PipelineOrchestrator:
         _progress("Объединение результатов...", 55)
         merged = self._merge_stages(docling_result, vlm_result)
 
-        # ── Stage 3: OCR Verification ───────────────────────────────
-        _progress("OCR: верификация чисел...", 65)
+        # ── Stage 3: OCR Verification (CPU — works with VLM loaded) ──
+        _progress("OCR: верификация чисел...", 60)
         logger.info("Stage 3: OCR verification starting")
 
         ocr_result = StageResult(source="ocr")
@@ -96,12 +92,12 @@ class PipelineOrchestrator:
                      len(ocr_result.models), ocr_result.errors)
 
         # ── Confidence scoring ──────────────────────────────────────
-        _progress("Расчёт confidence...", 75)
+        _progress("Расчёт confidence...", 70)
         result = self.scorer.merge_all(docling_result, vlm_result, ocr_result)
 
-        # ── Stage 4: Self-correction ────────────────────────────────
-        _progress("Self-correction: поиск пропущенных...", 80)
-        logger.info("Stage 4: Self-correction starting")
+        # ── Stage 4: Self-correction (VLM still loaded — no restart!) ──
+        _progress("Self-correction: поиск пропущенных...", 75)
+        logger.info("Stage 4: Self-correction starting (VLM still active)")
 
         gaps = [m for m in result.models if not m.is_complete]
         if gaps:
@@ -111,6 +107,10 @@ class PipelineOrchestrator:
             except Exception as e:
                 logger.error("Stage 4 self-correct error: %s", e)
                 result.errors.append(f"Self-correct: {e}")
+
+        # ── NOW restart Docling (after all VLM work is done) ────────
+        _progress("Перезапуск Docling...", 85)
+        start_docling()
 
         logger.info("Stage 4 done: %d/%d complete", result.complete_models, result.total_models)
 

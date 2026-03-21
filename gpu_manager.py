@@ -21,37 +21,65 @@ def _ssh(cmd):
 
 
 def stop_docling():
-    """Stop Docling to free GPU VRAM for VLM."""
-    ok, out = _ssh("systemctl stop docling-parser && sleep 3 && nvidia-smi --query-compute-apps=used_memory --format=csv,noheader,nounits")
+    """Stop Docling to free GPU VRAM for VLM. Then warmup VLM."""
+    ok, out = _ssh("systemctl stop docling-parser")
     if ok:
-        logger.info("Docling stopped, VRAM after: %s", out)
-        time.sleep(10)  # Extra wait for GPU memory to fully release
-    return ok
+        logger.info("Docling stopped")
+        time.sleep(10)
 
+    # Warmup: send real page image to VLM to trigger Ollama model load.
+    # First request takes 30-60s as model loads into VRAM.
+    logger.info("Warming up VLM (loading model ~40s)...")
+    for attempt in range(3):
+        try:
+            import base64, fitz, glob
+            # Find any PDF to render a warmup page from
+            pdfs = glob.glob("/root/ONIS/catalogs/*.pdf") + glob.glob("/root/pump_parser/uploads/*.pdf")
+            warmup_img = ""
+            if pdfs:
+                doc = fitz.open(pdfs[0])
+                pix = doc[0].get_pixmap(matrix=fitz.Matrix(1.0, 1.0))  # low res
+                warmup_img = base64.b64encode(pix.tobytes("png")).decode()
+                doc.close()
+            if not warmup_img:
+                warmup_img = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
 
-def unload_ollama():
-    """Unload Ollama model from VRAM (keep service running)."""
-    _ssh('curl -s http://localhost:11434/api/generate -d \'{"model":"qwen2.5vl:7b","keep_alive":0}\' > /dev/null 2>&1')
-    logger.info("Ollama model unload requested")
-    time.sleep(5)
+            r = requests.post(
+                f"http://{GPU_HOST}:8000/analyze",
+                data={"image": warmup_img, "task": "extract_pumps"},
+                timeout=300,  # Model load can take 200s+ first time
+            )
+            if r.status_code == 200:
+                body = r.json() if r.text else {}
+                has_error = bool(body.get("error"))
+                if not has_error:
+                    logger.info("VLM warmup OK (attempt %d, %.0fs)", attempt + 1, r.elapsed.total_seconds())
+                    return True
+                else:
+                    # HTTP 200 but Ollama returned error inside — model still loading
+                    logger.warning("VLM warmup attempt %d: model not ready (%s)", attempt + 1, str(body.get("error", ""))[:80])
+            else:
+                logger.warning("VLM warmup attempt %d: HTTP %s", attempt + 1, r.status_code)
+        except requests.exceptions.Timeout:
+            logger.warning("VLM warmup attempt %d: timeout", attempt + 1)
+        except Exception as e:
+            logger.warning("VLM warmup attempt %d: %s", attempt + 1, e)
+        time.sleep(10)
 
-
-def warmup_ollama():
-    """Load Ollama model into memory before VLM requests."""
-    logger.info("Warming up Ollama model...")
-    _ssh('curl -s http://localhost:11434/api/generate -d \'{"model":"qwen2.5vl:7b","prompt":"hello","stream":false}\' > /dev/null 2>&1')
-    logger.info("Ollama warmup done")
-    time.sleep(2)
+    logger.error("VLM warmup failed after 3 attempts")
+    return False
 
 
 def start_docling():
-    """Restart Docling after VLM is done. First unload Ollama model."""
-    unload_ollama()
-    time.sleep(3)
+    """Restart Docling after VLM is done. Kill Ollama model first."""
+    # Restart Ollama to fully release VRAM
+    _ssh("systemctl restart ollama")
+    logger.info("Ollama restarted to release VRAM")
+    time.sleep(5)
 
     ok, out = _ssh("systemctl start docling-parser")
     if ok:
-        logger.info("Docling restarted, waiting for ready...")
+        logger.info("Docling starting, waiting for ready...")
         for _ in range(20):
             time.sleep(3)
             try:

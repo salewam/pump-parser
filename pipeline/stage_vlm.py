@@ -68,7 +68,13 @@ class VLMStage:
                     timeout=self._timeout,
                 )
                 if resp.status_code == 200:
-                    return resp.json()
+                    body = resp.json()
+                    # Check for Ollama error wrapped in 200 response
+                    if body.get("error") and not body.get("pumps") and not body.get("models") and not body.get("analysis"):
+                        last_error = f"Ollama error: {str(body['error'])[:60]}"
+                        logger.warning("VLM attempt %d: %s", attempt, last_error)
+                    else:
+                        return body
                 else:
                     last_error = f"HTTP {resp.status_code}"
                     logger.warning("VLM attempt %d: %s", attempt, last_error)
