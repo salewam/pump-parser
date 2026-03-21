@@ -131,12 +131,17 @@ class PipelineOrchestrator:
             # Determine which pages to process
             pages_with_tables = set()
             for t in docling_result.raw_tables:
-                pages_with_tables.add(t.get("page", 0))
-            # Also process first 20 pages if Docling found nothing
-            if not docling_result.models:
-                pages_to_check = list(range(min(20, len(doc))))
-            else:
+                pg = t.get("page", -1)
+                if pg >= 0:
+                    pages_with_tables.add(pg)
+
+            if pages_with_tables:
                 pages_to_check = sorted(pages_with_tables)
+            else:
+                # Docling doesn't report page numbers — scan all pages
+                pages_to_check = list(range(min(len(doc), 25)))
+
+            ollama_ready = False
 
             for pg in pages_to_check:
                 if pg >= len(doc):
@@ -145,18 +150,30 @@ class PipelineOrchestrator:
                     pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(1.5, 1.5))
                     b64 = base64.b64encode(pix.tobytes("png")).decode()
 
-                    r = requests.post(
-                        f"http://{GPU_HOST}:8000/analyze",
-                        data={"image": b64, "task": "extract_pumps"},
-                        timeout=300,
-                    )
-                    if r.status_code != 200:
+                    # Retry loop: Ollama needs time to load model (~30-60s)
+                    d = None
+                    for attempt in range(6 if not ollama_ready else 1):
+                        r = requests.post(
+                            f"http://{GPU_HOST}:8000/analyze",
+                            data={"image": b64, "task": "extract_pumps"},
+                            timeout=300,
+                        )
+                        if r.status_code != 200:
+                            if not ollama_ready:
+                                time.sleep(15)
+                            continue
+
+                        d = r.json()
+                        if d.get("error") and not ollama_ready:
+                            logger.info("VLM pg%d: model loading (attempt %d)...", pg, attempt + 1)
+                            time.sleep(15)
+                            continue
+                        break
+
+                    if not d or d.get("error"):
                         continue
 
-                    d = r.json()
-                    if d.get("error"):
-                        logger.debug("VLM pg%d: model loading...", pg)
-                        continue
+                    ollama_ready = True
 
                     pumps = d.get("pumps", [])
                     if pumps:
