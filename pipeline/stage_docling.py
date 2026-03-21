@@ -91,6 +91,12 @@ class DoclingStage:
         """Keyword-based column role detection."""
         model_col = q_col = h_col = kw_col = rpm_col = None
 
+        # Skip dimension tables (L1, L2, B1, etc.)
+        cols_lower = [str(c).lower().strip() for c in cols]
+        dim_markers = ["l1", "l2", "l3", "b1", "b2", "размер", "габарит", "dimension"]
+        if sum(1 for cl in cols_lower if any(d in cl for d in dim_markers)) >= 2:
+            return model_col, q_col, h_col, kw_col, rpm_col  # skip this table
+
         MODEL_KW = ["модель", "model", "тип", "type", "наименование", "насос", "pump", "обозначение"]
         Q_KW = ["подача", "расход", "flow", "q,", "q ", "м³/ч", "m3/h", "производительность", "capacity", "qном", "q"]
         H_KW = ["напор", "head", "h,", "h ", "давление", "pressure", "нном", "hном", "h"]
