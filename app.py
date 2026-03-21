@@ -1,650 +1,417 @@
 #!/usr/bin/env python3
 """
-PDF Парсер ONIS — Flask-приложение
+PDF Pump Parser v3 — Slim Flask app.
+All parsing logic in pipeline/, storage in storage/, models in models/.
+This file: routes only.
 """
-
-from flask import Flask, request, redirect, url_for, flash, session, send_file, jsonify, render_template_string
 import os
-import json
-import re
-from werkzeug.utils import secure_filename
-from datetime import datetime
 import sys
+import json
 import threading
-import uuid
 import time
+import uuid
+import logging
 
-# Universal Pump Parser v10
-sys.path.insert(0, '/root/ONIS')
-from universal_pump_parser import process_catalog
+sys.path.insert(0, "/root/pump_parser")
 
-def extract_cdm_from_pdf(filepath):
-    """Universal Pump Parser v10 — handles any pump catalog PDF."""
-    _, entries = process_catalog(filepath)
-    result = []
-    for e in entries:
-        result.append({
-            'id': e.model,
-            'kw': round(e.power_kw, 3),
-            'q': round(e.q_nom, 2),
-            'head_m': round(e.h_nom, 1),
-            'confidence': round(e.confidence, 2),
-            'data_source': e.data_source,
-            'manufacturer': e.manufacturer,
-        })
-    return result
+from flask import (Flask, request, redirect, url_for, flash, jsonify,
+                   render_template_string, send_file, send_from_directory)
+from werkzeug.utils import secure_filename
+
+from config import (UPLOAD_DIR, BASE_DIR, ONIS_DB_DIR, PHOTOS_DIR, DRAWINGS_DIR,
+                    MAX_UPLOAD_SIZE, SECRET_KEY, CATALOGS_DIR, BACKUP_API_KEY)
+from pipeline.orchestrator import PipelineOrchestrator
+from storage.task_manager import TaskManager
+from storage.base_manager import BaseManager
+from brand_qualifier import BrandQualifier
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+
+# ── App setup ───────────────────────────────────────────────────────
 
 app = Flask(__name__)
-app.secret_key = 'cdm-parser-super-secret-key-2026'
-app.config['UPLOAD_FOLDER'] = '/root/pump_parser/uploads'
-app.config['MAX_CONTENT_LENGTH'] = 50 * 1024 * 1024  # 50MB
+app.secret_key = SECRET_KEY
+app.config["UPLOAD_FOLDER"] = UPLOAD_DIR
+app.config["MAX_CONTENT_LENGTH"] = MAX_UPLOAD_SIZE
 
-# Серверное хранилище задач и результатов (вместо cookie-сессий)
-parse_tasks = {}
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(ONIS_DB_DIR, exist_ok=True)
+os.makedirs(PHOTOS_DIR, exist_ok=True)
 
-HTML_TEMPLATE = '''<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>PDF Парсер ONIS</title>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            background: linear-gradient(135deg, #1a1a1a 0%, #2d2d2d 100%);
-            color: #e0e0e0;
-            min-height: 100vh;
-            padding: 20px;
-        }
-        .container { max-width: 1200px; margin: 0 auto; }
-        header {
-            text-align: center;
-            margin-bottom: 30px;
-            padding: 25px;
-            background: rgba(255,255,255,0.05);
-            border-radius: 12px;
-            border: 1px solid rgba(46,184,170,0.2);
-        }
-        h1 {
-            font-size: 2.2em;
-            background: linear-gradient(135deg, #2EB8AA, #1A9E8F);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-            margin-bottom: 8px;
-        }
-        .subtitle { color: #999; font-size: 1.05em; }
-        .upload-section {
-            background: rgba(255,255,255,0.05);
-            border: 2px dashed rgba(46,184,170,0.5);
-            border-radius: 12px;
-            padding: 40px;
-            text-align: center;
-            margin-bottom: 30px;
-            transition: border-color 0.3s, background 0.3s;
-        }
-        .upload-section:hover { border-color: #2EB8AA; }
-        .upload-section.dragover { border-color: #2EB8AA; background: rgba(46,184,170,0.08); }
-        .upload-icon { font-size: 3.5em; margin-bottom: 15px; }
-        .upload-text { font-size: 1.15em; color: #ccc; margin-bottom: 20px; }
-        input[type="file"] { position: absolute; left: -9999px; }
-        .file-label {
-            background: linear-gradient(135deg, #2EB8AA, #1A9E8F);
-            color: #fff; padding: 14px 36px;
-            border-radius: 8px; font-size: 1.05em;
-            cursor: pointer; transition: all 0.3s;
-            display: inline-block;
-        }
-        .file-label:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 20px rgba(46,184,170,0.4);
-        }
-        .btn {
-            background: linear-gradient(135deg, #2EB8AA, #1A9E8F);
-            color: #fff; border: none;
-            padding: 12px 28px; border-radius: 8px;
-            font-size: 1em; cursor: pointer;
-            transition: all 0.3s; margin: 8px 4px;
-            text-decoration: none; display: inline-block;
-        }
-        .btn:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 20px rgba(46,184,170,0.4);
-        }
-        .btn-secondary { background: rgba(255,255,255,0.1); }
-        .results-section {
-            background: rgba(255,255,255,0.05);
-            border-radius: 12px;
-            padding: 25px;
-            margin-top: 20px;
-            border: 1px solid rgba(46,184,170,0.15);
-        }
-        .results-header {
-            display: flex; justify-content: space-between;
-            align-items: center; margin-bottom: 20px;
-            flex-wrap: wrap; gap: 15px;
-        }
-        .results-title { font-size: 1.4em; color: #2EB8AA; }
-        .results-stats { display: flex; gap: 25px; }
-        .results-stat { text-align: center; }
-        .results-stat-value { font-size: 1.5em; font-weight: bold; color: #2EB8AA; }
-        .results-stat-label { font-size: 0.8em; color: #999; }
-        .table-container { max-height: 500px; overflow-y: auto; margin-top: 15px; }
-        table { width: 100%; border-collapse: collapse; }
-        thead { position: sticky; top: 0; background: #2d2d2d; z-index: 10; }
-        th {
-            padding: 12px; text-align: left;
-            border-bottom: 2px solid #2EB8AA;
-            color: #2EB8AA; font-weight: 600;
-        }
-        td { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.08); }
-        tr:hover { background: rgba(46,184,170,0.05); }
-        .message {
-            padding: 14px 20px; border-radius: 8px;
-            margin: 15px 0; text-align: center; font-size: 1.05em;
-        }
-        .message.success {
-            background: rgba(76,175,80,0.15);
-            border: 1px solid #4caf50; color: #4caf50;
-        }
-        .message.error {
-            background: rgba(244,67,54,0.15);
-            border: 1px solid #f44336; color: #f44336;
-        }
-        .actions { text-align: center; margin-top: 20px; }
-        footer {
-            text-align: center; margin-top: 40px;
-            padding: 15px; color: #555; font-size: 0.85em;
-        }
-        .progress-overlay {
-            display: none;
-            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
-            background: rgba(0,0,0,0.8); z-index: 1000;
-            justify-content: center; align-items: center; flex-direction: column;
-        }
-        .progress-overlay.active { display: flex; }
-        .progress-box {
-            background: #2d2d2d; border-radius: 12px; padding: 40px 50px;
-            border: 1px solid rgba(46,184,170,0.3); text-align: center; min-width: 350px;
-        }
-        .progress-title { color: #2EB8AA; font-size: 1.2em; margin-bottom: 20px; }
-        .progress-bar-bg {
-            width: 100%; height: 8px; background: rgba(255,255,255,0.1);
-            border-radius: 4px; overflow: hidden; margin-bottom: 12px;
-        }
-        .progress-bar-fill {
-            height: 100%; width: 0%; border-radius: 4px;
-            background: linear-gradient(90deg, #2EB8AA, #1A9E8F);
-            transition: width 0.3s;
-        }
-        .progress-percent { color: #ccc; font-size: 1.1em; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <header>
-            <h1>PDF Парсер ONIS</h1>
-            <div class="subtitle">Загрузите PDF каталог — получите структурированные данные</div>
-        </header>
+# ── Shared instances ────────────────────────────────────────────────
 
-        {% with messages = get_flashed_messages(with_categories=true) %}
-            {% if messages %}
-                {% for category, message in messages %}
-                    <div class="message {{ category }}">{{ message }}</div>
-                {% endfor %}
-            {% endif %}
-        {% endwith %}
+pipeline = PipelineOrchestrator()
+task_mgr = TaskManager()
+base_mgr = BaseManager()
+brand_qual = BrandQualifier()
 
-        <div class="progress-overlay" id="progress-overlay">
-            <div class="progress-box">
-                <div class="progress-title" id="progress-title">Загрузка файла...</div>
-                <div class="progress-bar-bg"><div class="progress-bar-fill" id="progress-bar"></div></div>
-                <div class="progress-percent" id="progress-percent">0%</div>
-            </div>
-        </div>
-
-        {% if not parsed_data %}
-        <form method="POST" action="/upload" enctype="multipart/form-data" id="upload-form">
-            <div class="upload-section" id="drop-zone">
-                <div class="upload-icon">📄</div>
-                <div>
-                    <input type="file" name="file" id="file-input" accept=".pdf" required>
-                    <label for="file-input" class="file-label">Выбрать PDF файл</label>
-                </div>
-            </div>
-        </form>
-        <script>
-        var overlay = document.getElementById('progress-overlay');
-        var bar = document.getElementById('progress-bar');
-        var pct = document.getElementById('progress-percent');
-        var title = document.getElementById('progress-title');
-
-        function uploadFile(file) {
-            var fd = new FormData();
-            fd.append('file', file);
-            overlay.classList.add('active');
-            title.textContent = 'Загрузка файла...';
-            bar.style.width = '0%';
-            pct.textContent = '0%';
-
-            var xhr = new XMLHttpRequest();
-            xhr.upload.addEventListener('progress', function(e) {
-                if (e.lengthComputable) {
-                    var p = Math.round(e.loaded / e.total * 100);
-                    bar.style.width = p + '%';
-                    pct.textContent = p + '%';
-                }
-            });
-            xhr.addEventListener('load', function() {
-                try {
-                    var resp = JSON.parse(xhr.responseText);
-                    if (resp.task_id) {
-                        title.textContent = 'Парсинг...';
-                        bar.style.width = '0%';
-                        pct.textContent = '0%';
-                        pollProgress(resp.task_id, resp.total_pages);
-                    } else {
-                        window.location.href = './';
-                    }
-                } catch(err) { window.location.href = './'; }
-            });
-            xhr.addEventListener('error', function() { window.location.href = './'; });
-            xhr.open('POST', 'upload');
-            xhr.setRequestHeader('X-Requested-With', 'XMLHttpRequest');
-            xhr.send(fd);
-        }
-
-        function pollProgress(taskId, totalPages) {
-            var interval = setInterval(function() {
-                var r = new XMLHttpRequest();
-                r.open('GET', '/progress/' + taskId);
-                r.addEventListener('load', function() {
-                    try {
-                        var d = JSON.parse(r.responseText);
-                        if (d.status === 'done') {
-                            clearInterval(interval);
-                            bar.style.width = '100%';
-                            pct.textContent = '100%';
-                            title.textContent = 'Готово!';
-                            setTimeout(function() {
-                                window.location.href = '/results/' + taskId;
-                            }, 500);
-                        } else if (d.status === 'error') {
-                            clearInterval(interval);
-                            title.textContent = 'Ошибка!';
-                            setTimeout(function() { window.location.href = './'; }, 1000);
-                        } else {
-                            bar.style.width = d.progress + '%';
-                            pct.textContent = d.progress + '%';
-                            title.textContent = 'Парсинг...';
-                        }
-                    } catch(err) {}
-                });
-                r.send();
-            }, 500);
-        }
-
-        document.getElementById('file-input').addEventListener('change', function() {
-            if (this.files.length) uploadFile(this.files[0]);
-        });
-        var dropZone = document.getElementById('drop-zone');
-        dropZone.addEventListener('dragover', function(e) {
-            e.preventDefault();
-            dropZone.classList.add('dragover');
-        });
-        dropZone.addEventListener('dragleave', function(e) {
-            e.preventDefault();
-            dropZone.classList.remove('dragover');
-        });
-        dropZone.addEventListener('drop', function(e) {
-            e.preventDefault();
-            dropZone.classList.remove('dragover');
-            var files = e.dataTransfer.files;
-            if (files.length && files[0].name.toLowerCase().endsWith('.pdf')) {
-                uploadFile(files[0]);
-            }
-        });
-        </script>
-        {% endif %}
-
-        {% if parsed_data %}
-        <div class="results-section">
-            <div class="results-header">
-                <div class="results-title">Результаты парсинга</div>
-                <div class="results-stats">
-                    <div class="results-stat">
-                        <div class="results-stat-value">{{ parsed_stats.total }}</div>
-                        <div class="results-stat-label">Записей</div>
-                    </div>
-                    <div class="results-stat">
-                        <div class="results-stat-value">{{ parsed_stats.models }}</div>
-                        <div class="results-stat-label">Моделей</div>
-                    </div>
-                </div>
-            </div>
-
-            <div class="table-container">
-                <table>
-                    <thead>
-                        <tr>
-                            <th>№</th>
-                            <th>Модель</th>
-                            <th>Мощность (кВт)</th>
-                            <th>Расход Q (м³/ч)</th>
-                            <th>Напор H (м)</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for pump in parsed_data %}
-                        <tr>
-                            <td>{{ loop.index }}</td>
-                            <td><strong>{{ pump.id }}</strong></td>
-                            <td>{{ pump.kw }}</td>
-                            <td>{{ pump.q }}</td>
-                            <td>{{ pump.head_m }}</td>
-                        </tr>
-                        {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-
-            <div class="actions">
-                {% if result_id %}
-                <a href="/download/{{ result_id }}" class="btn">Скачать JSON</a>
-                <button class="btn" id="btn-save-bot" onclick="saveToBotKB('{{ result_id }}')">Загрузить в базу знаний бота</button>
-                {% endif %}
-                <a href="/" class="btn btn-secondary">Загрузить другой файл</a>
-            </div>
-            <div id="save-msg" class="message" style="display:none;"></div>
-            <script>
-            function saveToBotKB(taskId) {
-                var btn = document.getElementById('btn-save-bot');
-                btn.textContent = 'Сохранение...';
-                btn.style.opacity = '0.6';
-                btn.disabled = true;
-                var r = new XMLHttpRequest();
-                r.open('POST', '/save_to_bot/' + taskId);
-                r.addEventListener('load', function() {
-                    var msg = document.getElementById('save-msg');
-                    try {
-                        var d = JSON.parse(r.responseText);
-                        if (d.ok) {
-                            msg.className = 'message success';
-                            msg.textContent = d.message;
-                            btn.textContent = 'Загружено';
-                        } else {
-                            msg.className = 'message error';
-                            msg.textContent = d.error;
-                            btn.textContent = 'Загрузить в базу знаний бота';
-                            btn.style.opacity = '1';
-                            btn.disabled = false;
-                        }
-                    } catch(e) {
-                        msg.className = 'message error';
-                        msg.textContent = 'Ошибка';
-                        btn.textContent = 'Загрузить в базу знаний бота';
-                        btn.style.opacity = '1';
-                        btn.disabled = false;
-                    }
-                    msg.style.display = 'block';
-                });
-                r.send();
-            }
-            </script>
-        </div>
-        {% endif %}
-
-        <footer></footer>
-    </div>
-</body>
-</html>'''
+# Legacy: keep parse_tasks in memory for backward compat with UI polling
+parse_tasks = task_mgr._tasks
 
 
-@app.route('/')
-def index():
-    """Главная страница"""
-    return render_template_string(HTML_TEMPLATE, parsed_data=None, parsed_stats=None, result_id=None)
+# ── Helper: run pipeline in background thread ───────────────────────
 
-
-def _run_parse(task_id, filepath):
-    """Фоновый парсинг"""
+def _run_pipeline(task_id, filepath):
+    """Background thread: run 4-stage pipeline, update task."""
     try:
-        parse_tasks[task_id]['status'] = 'parsing'
-        parse_tasks[task_id]['start_time'] = time.time()
+        def progress_cb(phase, pct):
+            task_mgr.update_task(task_id, {"phase": phase, "progress": pct, "status": "parsing"})
 
-        parsed_data = extract_cdm_from_pdf(filepath)
+        result = pipeline.parse(filepath, progress_cb=progress_cb)
 
-        if not parsed_data or len(parsed_data) == 0:
-            parse_tasks[task_id]['status'] = 'error'
-            parse_tasks[task_id]['error'] = 'В PDF не найдено данных о насосах'
-        else:
-            models = set(p['id'] for p in parsed_data)
-            # Сохраняем JSON на диск
-            result_path = os.path.join(app.config['UPLOAD_FOLDER'], f'result_{task_id}.json')
-            os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-            with open(result_path, 'w', encoding='utf-8') as f:
-                json.dump(parsed_data, f, ensure_ascii=False, indent=2)
+        # Save result JSON
+        result_path = os.path.join(UPLOAD_DIR, f"result_{task_id}.json")
+        models_dicts = [m.to_dict() for m in result.models]
+        with open(result_path, "w", encoding="utf-8") as f:
+            json.dump(models_dicts, f, ensure_ascii=False, indent=2)
 
-            # Определяем тип каталога по моделям в данных
-            all_ids = ' '.join(p['id'] for p in parsed_data).upper()
-            if 'CDM' in all_ids:
-                catalog_type = 'CDM'
-            elif 'LVR' in all_ids or 'LVS' in all_ids:
-                catalog_type = 'LVR'
-            elif 'MV' in all_ids:
-                catalog_type = 'MV'
-            else:
-                catalog_type = 'PUMP'
-
-            parse_tasks[task_id]['catalog_type'] = catalog_type
-            parse_tasks[task_id]['parsed_data'] = parsed_data
-            parse_tasks[task_id]['parsed_stats'] = {
-                'total': len(parsed_data),
-                'models': len(models)
-            }
-            parse_tasks[task_id]['result_path'] = result_path
-            parse_tasks[task_id]['status'] = 'done'
+        task_mgr.update_task(task_id, {
+            "status": "done",
+            "parsed_data": models_dicts,
+            "parsed_stats": {
+                "total": result.total_models,
+                "complete": result.complete_models,
+                "completeness": result.completeness,
+                "series": len(result.series_detected),
+                "time": result.elapsed,
+            },
+            "result_path": result_path,
+            "catalog_type": result.series_detected[0] if result.series_detected else "PUMP",
+            "brand": result.brand,
+            "brand_confidence": result.brand_confidence,
+            "brand_source": result.brand_source,
+            "series_detected": result.series_detected,
+            "models_found": result.total_models,
+            "elapsed": result.elapsed,
+            "stages_completed": result.stages_completed,
+            "errors": result.errors,
+        })
 
     except Exception as e:
-        parse_tasks[task_id]['status'] = 'error'
-        parse_tasks[task_id]['error'] = str(e)
+        logging.error("Pipeline error for task %s: %s", task_id, e)
+        task_mgr.update_task(task_id, {"status": "error", "error": str(e)})
     finally:
         if os.path.exists(filepath):
             os.remove(filepath)
 
 
-@app.route('/upload', methods=['POST'])
-def upload():
-    """Загрузка PDF"""
-    is_xhr = request.headers.get('X-Requested-With') == 'XMLHttpRequest'
+# ══════════════════════════════════════════════════════════════════════
+# ROUTES
+# ══════════════════════════════════════════════════════════════════════
 
-    try:
-        if 'file' not in request.files:
-            if is_xhr:
-                return jsonify({'error': 'Файл не выбран'})
-            flash('Файл не выбран', 'error')
-            return redirect(url_for('index'))
+# ── Main pages (import HTML from old parser_app for now) ─────────────
+# TODO: Story 8.1 — extract to ui/templates/*.html
 
-        file = request.files['file']
-
-        if file.filename == '':
-            if is_xhr:
-                return jsonify({'error': 'Файл не выбран'})
-            flash('Файл не выбран', 'error')
-            return redirect(url_for('index'))
-
-        if not file.filename.lower().endswith('.pdf'):
-            if is_xhr:
-                return jsonify({'error': 'Выберите PDF файл'})
-            flash('Пожалуйста, выберите PDF файл', 'error')
-            return redirect(url_for('index'))
-
-        # Надёжное сохранение файла
-        filename = secure_filename(file.filename)
-        if not filename or filename == '':
-            filename = 'upload.pdf'
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        filename = f"{timestamp}_{filename}"
-        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-
-        os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-        file.save(filepath)
-
-        # Проверяем что PDF валидный и считаем страницы
-        try:
-            import fitz
-            doc = fitz.open(filepath)
-            total_pages = len(doc)
-            doc.close()
-        except Exception as e:
-            if os.path.exists(filepath):
-                os.remove(filepath)
-            if is_xhr:
-                return jsonify({'error': f'Файл повреждён: {str(e)}'})
-            flash(f'Файл повреждён: {str(e)}', 'error')
-            return redirect(url_for('index'))
-
-        # Тип каталога определяется ПОСЛЕ парсинга по моделям (CDM, LVR, MV...)
-        # Пока ставим заглушку, реальный тип будет определён в _run_parse
-        catalog_type = 'PUMP'
-
-        if is_xhr:
-            task_id = uuid.uuid4().hex[:8]
-            parse_tasks[task_id] = {
-                'status': 'starting',
-                'progress': 0,
-                'total_pages': total_pages,
-                'start_time': time.time(),
-                'catalog_type': catalog_type
-            }
-
-            thread = threading.Thread(target=_run_parse, args=(task_id, filepath), daemon=True)
-            thread.start()
-
-            return jsonify({'task_id': task_id, 'total_pages': total_pages})
-        else:
-            # Обычная форма
-            try:
-                parsed_data = extract_cdm_from_pdf(filepath)
-                if parsed_data:
-                    models = set(p['id'] for p in parsed_data)
-                    flash(f'Извлечено {len(parsed_data)} записей из {len(models)} моделей', 'success')
-                    task_id = uuid.uuid4().hex[:8]
-                    result_path = os.path.join(app.config['UPLOAD_FOLDER'], f'result_{task_id}.json')
-                    with open(result_path, 'w', encoding='utf-8') as f:
-                        json.dump(parsed_data, f, ensure_ascii=False, indent=2)
-                    parse_tasks[task_id] = {
-                        'parsed_data': parsed_data,
-                        'parsed_stats': {'total': len(parsed_data), 'models': len(models)},
-                        'result_path': result_path,
-                        'status': 'done',
-                        'catalog_type': catalog_type
-                    }
-                    return redirect(f'/results/{task_id}')
-                else:
-                    flash('В PDF не найдено данных', 'error')
-            except Exception as e:
-                flash(f'Ошибка: {str(e)}', 'error')
-            finally:
-                if os.path.exists(filepath):
-                    os.remove(filepath)
-            return redirect(url_for('index'))
-
-    except Exception as e:
-        if is_xhr:
-            return jsonify({'error': str(e)})
-        flash(f'Ошибка: {str(e)}', 'error')
-        return redirect(url_for('index'))
+# For now, import HTML_TEMPLATE, DOCS_HTML, CATALOGS_HTML from old file
+try:
+    from parser_app import HTML_TEMPLATE, DOCS_HTML, CATALOGS_HTML
+    _HAS_TEMPLATES = True
+except ImportError:
+    _HAS_TEMPLATES = False
+    HTML_TEMPLATE = "<h1>Parser v3</h1><p>Templates not loaded</p>"
+    DOCS_HTML = "<h1>Docs</h1>"
+    CATALOGS_HTML = "<h1>Catalogs</h1>"
 
 
-@app.route('/progress/<task_id>')
-def progress(task_id):
-    """Прогресс парсинга — оценка по времени и страницам"""
-    task = parse_tasks.get(task_id)
-    if not task:
-        return jsonify({'status': 'error', 'error': 'Задача не найдена'})
+@app.route("/")
+def index():
+    return render_template_string(HTML_TEMPLATE, parsed_data=None, parsed_stats=None,
+                                  result_id=None, catalog_type=None, existing_catalogs=None)
 
-    status = task.get('status', 'unknown')
-    total_pages = task.get('total_pages', 1)
 
-    if status == 'done':
-        pct = 100
-    elif status in ('parsing', 'starting'):
-        elapsed = time.time() - task.get('start_time', time.time())
-        est_seconds = total_pages * 2.0
-        if est_seconds > 0:
-            pct = min(int(elapsed / est_seconds * 100), 95)
-        else:
-            pct = 50
+@app.route("/docs")
+def docs():
+    return render_template_string(DOCS_HTML)
+
+
+@app.route("/catalogs")
+def catalogs_page():
+    if _HAS_TEMPLATES:
+        from parser_app import load_onis_catalogs
+        catalogs = load_onis_catalogs()
     else:
-        pct = 0
-
-    resp = {'status': status, 'progress': pct, 'total_pages': total_pages}
-    if status == 'error':
-        resp['error'] = task.get('error', '')
-    return jsonify(resp)
+        catalogs = []
+    return render_template_string(CATALOGS_HTML, catalogs=catalogs, parse_tasks=parse_tasks)
 
 
-@app.route('/results/<task_id>')
-def results(task_id):
-    """Страница результатов"""
-    task = parse_tasks.get(task_id)
-    if not task or 'parsed_data' not in task:
-        flash('Результаты не найдены', 'error')
-        return redirect(url_for('index'))
+# ── Upload + Parse ──────────────────────────────────────────────────
 
-    return render_template_string(
-        HTML_TEMPLATE,
-        parsed_data=task['parsed_data'],
-        parsed_stats=task['parsed_stats'],
-        result_id=task_id
-    )
+@app.route("/upload", methods=["POST"])
+def upload():
+    is_xhr = request.headers.get("X-Requested-With") == "XMLHttpRequest"
 
+    if "file" not in request.files:
+        return jsonify({"error": "Файл не выбран"}) if is_xhr else (flash("Файл не выбран", "error"), redirect("/"))[1]
 
-@app.route('/download/<task_id>')
-def download(task_id):
-    """Скачать JSON"""
-    task = parse_tasks.get(task_id)
-    if not task or 'result_path' not in task:
-        flash('Нет данных для скачивания', 'error')
-        return redirect(url_for('index'))
+    f = request.files["file"]
+    if not f.filename or not f.filename.lower().endswith(".pdf"):
+        return jsonify({"error": "Нужен PDF"}) if is_xhr else (flash("Нужен PDF", "error"), redirect("/"))[1]
 
-    result_path = task['result_path']
-    if not os.path.exists(result_path):
-        flash('Файл результатов не найден', 'error')
-        return redirect(url_for('index'))
+    filename = secure_filename(f.filename)
+    filepath = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex[:8]}_{filename}")
+    f.save(filepath)
 
-    timestamp = datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
-    return send_file(
-        result_path,
-        as_attachment=True,
-        download_name=f"parsed_{timestamp}.json",
-        mimetype='application/json'
-    )
+    file_size = os.path.getsize(filepath)
 
-
-@app.route('/save_to_bot/<task_id>', methods=['POST'])
-def save_to_bot(task_id):
-    """Сохранить результат в базу знаний бота (/root/) с именем каталога"""
-    task = parse_tasks.get(task_id)
-    if not task or 'parsed_data' not in task:
-        return jsonify({'ok': False, 'error': 'Результаты не найдены'})
-
+    # Count pages
+    total_pages = 0
     try:
-        # Сохраняем в /root/pump_base/{TYPE}_BASE.json
-        catalog_type = task.get('catalog_type', 'PUMP')
-        os.makedirs('/root/pump_base', exist_ok=True)
-        dest_path = f'/root/pump_base/{catalog_type}_BASE.json'
-        with open(dest_path, 'w', encoding='utf-8') as f:
-            json.dump(task['parsed_data'], f, ensure_ascii=False, indent=2)
-        count = len(task['parsed_data'])
-        return jsonify({'ok': True, 'message': f'Сохранено {count} записей → pump_base/{catalog_type}_BASE.json'})
-    except Exception as e:
-        return jsonify({'ok': False, 'error': f'Ошибка сохранения: {str(e)}'})
+        import fitz
+        doc = fitz.open(filepath)
+        total_pages = len(doc)
+        doc.close()
+    except Exception:
+        pass
+
+    task_id, is_new = task_mgr.create_task(filename, file_size)
+
+    if not is_new:
+        os.remove(filepath)
+        task = task_mgr.get_task(task_id)
+        return jsonify({"task_id": task_id, "status": task.get("status", "done"),
+                        "models_found": task.get("models_found", 0), "cached": True})
+
+    task_mgr.update_task(task_id, {
+        "status": "uploading",
+        "total_pages": total_pages,
+        "phase": "Запуск pipeline...",
+        "progress": 5,
+        "onis_mode": False,
+    })
+
+    t = threading.Thread(target=_run_pipeline, args=(task_id, filepath), daemon=True)
+    t.start()
+
+    return jsonify({"task_id": task_id, "total_pages": total_pages})
 
 
-# Алиас для совместимости
-application = app
+# ── Progress ────────────────────────────────────────────────────────
 
-if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=False)
+@app.route("/progress/<task_id>")
+def progress(task_id):
+    task = task_mgr.get_task(task_id)
+    if not task:
+        return jsonify({"status": "error", "error": "Задача не найдена"})
+
+    status = task.get("status", "unknown")
+    if status == "done":
+        return jsonify({
+            "status": "done",
+            "progress": 100,
+            "models_found": task.get("models_found", 0),
+            "elapsed": str(task.get("elapsed", 0)),
+            "brand": task.get("brand", ""),
+            "brand_confidence": task.get("brand_confidence", 0),
+        })
+    elif status == "error":
+        return jsonify({"status": "error", "error": task.get("error", "")})
+    else:
+        return jsonify({
+            "status": "parsing",
+            "progress": task.get("progress", 0),
+            "phase": task.get("phase", "Парсинг..."),
+        })
+
+
+# ── Results ─────────────────────────────────────────────────────────
+
+@app.route("/results/<task_id>")
+def results(task_id):
+    task = task_mgr.get_task(task_id)
+    if not task:
+        return "Задача не найдена", 404
+    data = task.get("parsed_data", [])
+    stats = task.get("parsed_stats", {})
+    catalog_type = task.get("catalog_type", "PUMP")
+    return render_template_string(HTML_TEMPLATE, parsed_data=data, parsed_stats=stats,
+                                  result_id=task_id, catalog_type=catalog_type, existing_catalogs=None)
+
+
+@app.route("/download/<task_id>")
+def download(task_id):
+    task = task_mgr.get_task(task_id)
+    if not task or "result_path" not in task:
+        return "Нет данных", 404
+    return send_file(task["result_path"], as_attachment=True,
+                     download_name=f"pumps_{task.get('catalog_type', 'data')}.json")
+
+
+# ── Save to bot KB ──────────────────────────────────────────────────
+
+@app.route("/save_to_bot/<task_id>", methods=["POST"])
+def save_to_bot(task_id):
+    task = task_mgr.get_task(task_id)
+    if not task or "parsed_data" not in task:
+        return jsonify({"ok": False, "error": "Нет данных"})
+
+    catalog_type = task.get("catalog_type", "PUMP")
+    models = task["parsed_data"]
+    brand = task.get("brand", "Unknown")
+
+    # Add brand to each model
+    for m in models:
+        m["brand"] = brand
+
+    # Detect series and save per-series BASE files
+    from models.pump_model import detect_series, detect_catalog_type
+    series_groups = {}
+    for m in models:
+        s = detect_series(m.get("model", ""))
+        series_groups.setdefault(s, []).append(m)
+
+    saved = 0
+    for series, series_models in series_groups.items():
+        if not series or len(series) < 2:
+            continue
+        base_models = []
+        for m in series_models:
+            base_models.append({
+                "id": m.get("model", ""),
+                "kw": m.get("power_kw", 0),
+                "q": m.get("q_nom", 0),
+                "head_m": m.get("h_nom", 0),
+                "series": series,
+                "brand": brand,
+                "flagship": series.upper() in ("MV", "INL", "MBL"),
+                "confidence": m.get("confidence", 0),
+            })
+        count = base_mgr.save(series, base_models)
+        saved += count
+
+    base_mgr.rebuild_index()
+
+    return jsonify({"ok": True, "message": f"Сохранено {saved} моделей ({catalog_type})"})
+
+
+# ── API: Bases ──────────────────────────────────────────────────────
+
+@app.route("/api/bases")
+def api_bases():
+    try:
+        with open(os.path.join(BASE_DIR, "brands_index.json")) as f:
+            index = json.load(f)
+    except Exception:
+        index = {}
+
+    brands = []
+    total_models = 0
+    for brand_name, brand_data in index.items():
+        series_list = brand_data.get("series", [])
+        brand_models = sum(s["count"] for s in series_list)
+        total_models += brand_models
+        brands.append({
+            "brand": brand_name,
+            "series": sorted(series_list, key=lambda s: (-int(s.get("flagship", False)), -s["count"])),
+            "series_count": len(series_list),
+            "models_count": brand_models,
+        })
+    brands.sort(key=lambda b: (0 if b["brand"] == "ONIS" else 1, -b["models_count"]))
+    return jsonify({"brands": brands, "total_models": total_models, "total_brands": len(brands)})
+
+
+@app.route("/api/rebrand", methods=["POST"])
+def api_rebrand():
+    updated = 0
+    brand_summary = {}
+    for b in base_mgr.list_bases():
+        models = base_mgr.load(b["name"])
+        if not models:
+            continue
+        br = brand_qual.qualify_from_models(models)
+        flagship = b["name"].upper() in ("MV", "INL", "MBL")
+        changed = False
+        for m in models:
+            if m.get("brand") != br.brand or m.get("flagship") != flagship:
+                m["brand"] = br.brand
+                m["flagship"] = flagship
+                changed = True
+        if changed:
+            base_mgr.save(b["name"], models)
+            updated += 1
+        brand_summary[br.brand] = brand_summary.get(br.brand, 0) + 1
+
+    base_mgr.rebuild_index()
+    return jsonify({"ok": True, "updated": updated, "brands": brand_summary})
+
+
+@app.route("/api/reparse-all", methods=["POST"])
+def api_reparse_all():
+    if not os.path.isdir(CATALOGS_DIR):
+        return jsonify({"ok": False, "error": "Catalogs dir not found"})
+    pdfs = sorted([f for f in os.listdir(CATALOGS_DIR) if f.lower().endswith(".pdf")])
+    results = []
+    for pdf in pdfs:
+        br = brand_qual.qualify(os.path.join(CATALOGS_DIR, pdf))
+        results.append({"file": pdf, "brand": br.brand, "confidence": br.confidence})
+    return jsonify({"ok": True, "catalogs": results, "total": len(results)})
+
+
+# ── ONIS Flagships (legacy compat) ──────────────────────────────────
+
+@app.route("/onis/parse_auto", methods=["POST"])
+def onis_parse_auto():
+    """Upload PDF for ONIS flagships — uses same pipeline."""
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "Файл не выбран"})
+    f = request.files["file"]
+    if not f.filename:
+        return jsonify({"ok": False, "error": "Пустое имя"})
+
+    filename = secure_filename(f.filename)
+    filepath = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex[:8]}_{filename}")
+    f.save(filepath)
+
+    file_size = os.path.getsize(filepath)
+    task_id, is_new = task_mgr.create_task(filename, file_size)
+
+    if not is_new:
+        os.remove(filepath)
+        return jsonify({"ok": True, "task_id": task_id, "cached": True})
+
+    # Extract catalog name from filename
+    name = os.path.splitext(filename)[0].upper()
+    task_mgr.update_task(task_id, {
+        "status": "uploading",
+        "onis_mode": True,
+        "onis_name": name,
+        "phase": "Запуск pipeline...",
+    })
+
+    t = threading.Thread(target=_run_pipeline, args=(task_id, filepath), daemon=True)
+    t.start()
+
+    return jsonify({"ok": True, "task_id": task_id})
+
+
+# ── Static files ────────────────────────────────────────────────────
+
+@app.route("/drawings/<path:filename>")
+def serve_drawing(filename):
+    return send_from_directory(DRAWINGS_DIR, filename)
+
+@app.route("/photos/<filename>")
+def serve_photo(filename):
+    return send_from_directory(PHOTOS_DIR, filename)
+
+
+# ── Backup API ──────────────────────────────────────────────────────
+
+@app.route("/api/backup", methods=["GET"])
+def api_backup():
+    key = request.args.get("key", "")
+    if key != BACKUP_API_KEY:
+        return jsonify({"error": "Invalid API key"}), 403
+    import zipfile, io
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        for fname in os.listdir(BASE_DIR):
+            if fname.endswith(".json"):
+                zf.write(os.path.join(BASE_DIR, fname), fname)
+    buf.seek(0)
+    return send_file(buf, mimetype="application/zip", as_attachment=True, download_name="pump_base_backup.zip")
+
+
+# ── Run ─────────────────────────────────────────────────────────────
+
+if __name__ == "__main__":
+    app.run(host="127.0.0.1", port=5000, debug=True)
