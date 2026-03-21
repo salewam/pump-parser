@@ -211,6 +211,47 @@ class PipelineOrchestrator:
                 except Exception as e:
                     logger.warning("VLM pg%d: %s", pg, e)
 
+            # Second pass: retry failed pages (those that returned no pumps)
+            processed_pages = {m.page_number for m in result.models}
+            failed_pages = [pg for pg in pages_to_check if pg not in processed_pages and pg < len(doc)]
+            if failed_pages and ollama_ready:
+                logger.info("VLM retry: %d failed pages", len(failed_pages))
+                for pg in failed_pages:
+                    try:
+                        pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(1.5, 1.5))
+                        b64 = base64.b64encode(pix.tobytes("png")).decode()
+                        r = requests.post(
+                            f"http://{GPU_HOST}:8000/analyze",
+                            data={"image": b64, "task": "extract_pumps"},
+                            timeout=300,
+                        )
+                        if r.status_code == 200:
+                            d = r.json()
+                            if not d.get("error"):
+                                for p in d.get("pumps", []):
+                                    name = str(p.get("model", "")).strip()
+                                    if not name or len(name) < 5 or name.isdigit():
+                                        continue
+                                    from config import KNOWN_SERIES
+                                    series = detect_series(name)
+                                    if series.upper() not in KNOWN_SERIES and len(name) < 10:
+                                        continue
+                                    result.models.append(PumpModelResult(
+                                        model=name, series=series,
+                                        q=float(p.get("q_nom", 0) or 0),
+                                        h=float(p.get("h_nom", 0) or 0),
+                                        kw=float(p.get("power_kw", 0) or 0),
+                                        page_number=pg,
+                                        confidence_q=0.5 if p.get("q_nom") else 0,
+                                        confidence_h=0.5 if p.get("h_nom") else 0,
+                                        confidence_kw=0.5 if p.get("power_kw") else 0,
+                                        source_q="vlm", source_h="vlm", source_kw="vlm",
+                                    ))
+                                result.pages_processed += 1
+                                logger.info("VLM retry pg%d: %d pumps", pg, len(d.get("pumps", [])))
+                    except Exception as e:
+                        logger.warning("VLM retry pg%d: %s", pg, e)
+
         finally:
             doc.close()
 
