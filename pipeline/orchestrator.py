@@ -360,9 +360,9 @@ class PipelineOrchestrator:
 
         logger.info("Merge total: %d H values filled", filled)
 
-        # Add VLM-only models
+        # Add VLM-only models (only if they have actual data)
         for vm in vlm.models:
-            if vm.key not in seen:
+            if vm.key not in seen and (vm.q > 0 or vm.h > 0 or vm.kw > 0):
                 merged.models.append(vm)
                 seen.add(vm.key)
 
