@@ -150,12 +150,23 @@ class PipelineOrchestrator:
                     pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(1.5, 1.5))
                     b64 = base64.b64encode(pix.tobytes("png")).decode()
 
+                    # Build context with known model names from Docling
+                    task = "extract_pumps"
+                    context = ""
+                    if docling_result.models:
+                        names = list(set(m.model for m in docling_result.models[:20]))
+                        context = ("Известные модели из этого каталога: " + ", ".join(names[:10]) +
+                                   ". Используй ПОЛНЫЕ названия моделей (например CMI 1-20-BQCE, не CM 1).")
+
                     # Retry loop: Ollama needs time to load model (~30-60s)
                     d = None
                     for attempt in range(6 if not ollama_ready else 1):
+                        post_data = {"image": b64, "task": task}
+                        if context:
+                            post_data["context"] = context
                         r = requests.post(
                             f"http://{GPU_HOST}:8000/analyze",
-                            data={"image": b64, "task": "extract_pumps"},
+                            data=post_data,
                             timeout=300,
                         )
                         if r.status_code != 200:
@@ -209,13 +220,28 @@ class PipelineOrchestrator:
         return result
 
     def _merge(self, docling, vlm):
-        """Merge: VLM fills Docling zeros."""
+        """Merge: VLM fills Docling zeros. Uses fuzzy key matching."""
         merged = StageResult(source="docling+vlm")
         vlm_map = {m.key: m for m in vlm.models}
+
+        # Also build fuzzy map: first word + first number -> model
+        import re
+        vlm_fuzzy = {}
+        for m in vlm.models:
+            # "CMI1-20" -> extract Q value as secondary match
+            if m.q > 0 and m.series:
+                fuzzy_key = f"{m.series}_{m.q}"
+                vlm_fuzzy[fuzzy_key] = m
+
         seen = set()
 
         for dm in docling.models:
+            # Try exact match first
             vm = vlm_map.get(dm.key)
+            # Fuzzy match: same series + same Q
+            if not vm and dm.series and dm.q > 0:
+                fuzzy_key = f"{dm.series}_{dm.q}"
+                vm = vlm_fuzzy.get(fuzzy_key)
             if vm:
                 if not dm.q and vm.q:
                     dm.q = vm.q
