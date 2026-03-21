@@ -40,7 +40,7 @@ class OCRStage:
             try:
                 resp = requests.post(
                     f"{self._url}/ocr",
-                    json={"image": image_b64},
+                    data={"image": image_b64, "lang": "ru"},
                     timeout=self._timeout,
                 )
                 if resp.status_code == 200:
