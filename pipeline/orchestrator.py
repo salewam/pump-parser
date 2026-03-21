@@ -138,8 +138,19 @@ class PipelineOrchestrator:
             if pages_with_tables:
                 pages_to_check = sorted(pages_with_tables)
             else:
-                # Docling doesn't report page numbers — scan all pages
-                pages_to_check = list(range(min(len(doc), 25)))
+                # Pre-filter: only pages with pump model names or numeric tables
+                import re as _re
+                pages_to_check = []
+                for pg_i in range(len(doc)):
+                    text = doc[pg_i].get_text()
+                    # Skip if page has < 3 numbers (no table data)
+                    nums = _re.findall(r'\d+[.,]\d+', text)
+                    # Skip cover/contents pages
+                    has_models = bool(_re.search(r'[A-ZА-Я]{2,5}\s*\d+[-]\d+', text))
+                    has_table_data = len(nums) >= 5
+                    if has_models or has_table_data:
+                        pages_to_check.append(pg_i)
+                logger.info("VLM: %d/%d pages have table data", len(pages_to_check), len(doc))
 
             ollama_ready = False
 
@@ -147,32 +158,44 @@ class PipelineOrchestrator:
                 if pg >= len(doc):
                     continue
                 try:
-                    pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(1.5, 1.5))
+                    pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(1.2, 1.2))
                     b64 = base64.b64encode(pix.tobytes("png")).decode()
 
                     task = "extract_pumps"
 
-                    # Retry loop: Ollama needs time to load model (~30-60s)
+                    # Retry loop: 6 attempts for first page (model loading), 3 for others
+                    max_attempts = 6 if not ollama_ready else 3
                     d = None
-                    for attempt in range(6 if not ollama_ready else 1):
-                        r = requests.post(
-                            f"http://{GPU_HOST}:8000/analyze",
-                            data={"image": b64, "task": task},
-                            timeout=300,
-                        )
+                    for attempt in range(max_attempts):
+                        try:
+                            r = requests.post(
+                                f"http://{GPU_HOST}:8000/analyze",
+                                data={"image": b64, "task": task},
+                                timeout=300,
+                            )
+                        except requests.exceptions.Timeout:
+                            logger.warning("VLM pg%d attempt %d: request timeout", pg, attempt + 1)
+                            continue
+                        except Exception as e:
+                            logger.warning("VLM pg%d attempt %d: %s", pg, attempt + 1, e)
+                            time.sleep(5)
+                            continue
+
                         if r.status_code != 200:
-                            if not ollama_ready:
-                                time.sleep(15)
+                            logger.warning("VLM pg%d attempt %d: HTTP %d", pg, attempt + 1, r.status_code)
+                            time.sleep(10 if not ollama_ready else 5)
                             continue
 
                         d = r.json()
-                        if d.get("error") and not ollama_ready:
-                            logger.info("VLM pg%d: model loading (attempt %d)...", pg, attempt + 1)
-                            time.sleep(15)
+                        if d.get("error"):
+                            logger.info("VLM pg%d attempt %d: %s", pg, attempt + 1, str(d["error"])[:60])
+                            time.sleep(15 if not ollama_ready else 5)
+                            d = None
                             continue
                         break
 
-                    if not d or d.get("error"):
+                    if not d:
+                        logger.warning("VLM pg%d: all %d attempts failed", pg, max_attempts)
                         continue
 
                     ollama_ready = True
@@ -218,7 +241,7 @@ class PipelineOrchestrator:
                 logger.info("VLM retry: %d failed pages", len(failed_pages))
                 for pg in failed_pages:
                     try:
-                        pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(1.5, 1.5))
+                        pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(1.2, 1.2))
                         b64 = base64.b64encode(pix.tobytes("png")).decode()
                         r = requests.post(
                             f"http://{GPU_HOST}:8000/analyze",
