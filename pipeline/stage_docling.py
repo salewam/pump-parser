@@ -116,7 +116,12 @@ class DoclingStage:
         """Find columns whose names match pump model patterns."""
         models = []
         for col in cols:
-            if re.match(PUMP_MODEL_RE, str(col).strip(), re.I):
+            s = str(col).strip()
+            # Standard pump model pattern
+            if re.match(PUMP_MODEL_RE, s, re.I):
+                models.append(col)
+            # "Модель.XX-YY" or "Model.XX" pattern (Wellmix catalogs)
+            elif re.match(r"(модель|model)[.\s_\-]?\d", s, re.I):
                 models.append(col)
         return models
 
@@ -167,7 +172,7 @@ class DoclingStage:
             rpm_val = parse_number(row.get(rpm_col)) if rpm_col else None
 
             pm = self._build_model(model_name, q, h, kw, rpm_val, page)
-            if pm.key and pm.key not in seen_keys:
+            if pm and pm.key and pm.key not in seen_keys:
                 seen_keys.add(pm.key)
                 all_models.append(pm)
 
@@ -208,7 +213,7 @@ class DoclingStage:
 
         for mc, specs in spec_map.items():
             pm = self._build_model(mc.strip(), specs["q"], specs["h"], specs["kw"], specs["rpm"], page)
-            if pm.key and pm.key not in seen_keys:
+            if pm and pm.key and pm.key not in seen_keys:
                 seen_keys.add(pm.key)
                 all_models.append(pm)
 
@@ -216,6 +221,15 @@ class DoclingStage:
 
     def _build_model(self, model_name, q, h, kw, rpm_val, page):
         """Build PumpModelResult with enrichment and validation."""
+        # Filter obvious non-pump entries
+        name_upper = model_name.upper().strip()
+        REJECT = {"PN16", "PN25", "PN30", "PN40", "DN", "RPM", "HZ", "IP55", "IE2", "IE3",
+                  "ПАРАМЕТР", "МОДЕЛЬ", "MODEL", "TYPE", "ТИП", "ИТОГО", "TOTAL", "NOTE"}
+        if name_upper in REJECT or len(model_name.strip()) < 3:
+            return None
+        # Reject if starts with number only (like "1-2", "10", "50Hz")
+        if re.match(r"^\d+[-\s]?\d*$", name_upper) or re.match(r"^\d+\s*(hz|гц|кв|kw|rpm)", name_upper, re.I):
+            return None
         series = detect_series(model_name)
         pm = PumpModelResult(
             model=model_name,

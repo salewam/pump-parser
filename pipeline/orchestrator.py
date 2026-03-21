@@ -14,6 +14,7 @@ from pipeline.stage_ocr import OCRStage
 from pipeline.stage_selfcorrect import SelfCorrectionStage
 from pipeline.confidence import ConfidenceScorer
 from brand_qualifier import BrandQualifier
+from gpu_manager import stop_docling, start_docling
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,10 @@ class PipelineOrchestrator:
                      len(docling_result.models), len(docling_result.raw_tables), docling_result.errors)
 
         # ── Stage 2: VLM ────────────────────────────────────────────
+        _progress("VLM: освобождение GPU...", 30)
+        logger.info("Stage 2: stopping Docling to free VRAM")
+        stop_docling()
+
         _progress("VLM: валидация и дополнение...", 35)
         logger.info("Stage 2: VLM starting")
 
@@ -64,6 +69,9 @@ class PipelineOrchestrator:
         except Exception as e:
             logger.error("Stage 2 VLM error: %s", e)
             vlm_result.errors.append(str(e))
+        finally:
+            _progress("Перезапуск Docling...", 50)
+            start_docling()
 
         logger.info("Stage 2 done: %d models, errors=%s",
                      len(vlm_result.models), vlm_result.errors)
