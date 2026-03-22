@@ -169,7 +169,7 @@ class DoclingStage:
                     if not model_name or len(model_name) < 5:
                         continue
                     pm = self._build_model(model_name, None, None, None, None, page)
-                    if pm and pm.key and pm.key not in seen_keys and (pm.q > 0 or pm.kw > 0):
+                    if pm and pm.key and pm.key not in seen_keys and pm.q > 0 and pm.kw > 0:
                         seen_keys.add(pm.key)
                         all_models.append(pm)
 

@@ -16,7 +16,7 @@ def detect_series(model_name):
     m = re.match(rf"({pattern})\s*[/]?\s*\w*\s*(\d+)", model_name, re.I)
     if m:
         return m.group(1).upper()
-    return model_name.split("-")[0].split()[0].upper() if model_name else ""
+    parts = model_name.split("-")[0].split(); return parts[0].upper() if parts else "" if model_name else ""
 
 
 def parse_number(val):
