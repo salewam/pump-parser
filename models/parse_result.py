@@ -39,6 +39,7 @@ class PumpModelResult:
         k = self.model.upper().strip()
         k = re.sub(r"\s+", "", k)
         k = k.replace(",", ".")  # normalize comma decimal to dot
+        k = k.replace("(", "").replace(")", "")  # remove parentheses
         # Normalize Cyrillic lookalikes
         for cyr, lat in [("\u041c", "M"), ("\u0412", "B"), ("\u0421", "C"),
                          ("\u0415", "E"), ("\u041d", "H"), ("\u041e", "O"),
