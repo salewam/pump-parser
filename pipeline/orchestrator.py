@@ -57,13 +57,27 @@ class PipelineOrchestrator:
         docling_result = self.docling.extract(pdf_path)
         logger.info("Docling: %d models, %d tables", len(docling_result.models), len(docling_result.raw_tables))
 
-        # ── Stage 2: VLM (stop Docling, VLM page-by-page) ──────────
-        _p("VLM: остановка Docling...", 25)
-        _gpu_ssh("systemctl stop docling-parser")
-        time.sleep(8)
+        # ── Stage 1.5: DeepSeek column classification for incomplete tables ──
+        incomplete_count = sum(1 for m in docling_result.models if not m.is_complete)
+        if incomplete_count > 0 and docling_result.raw_tables:
+            _p("DeepSeek: классификация колонок...", 20)
+            self._deepseek_fill(docling_result)
+            new_complete = sum(1 for m in docling_result.models if m.is_complete)
+            logger.info("DeepSeek filled: %d -> %d complete", len(docling_result.models) - incomplete_count, new_complete)
 
-        _p("VLM: анализ страниц...", 30)
-        vlm_result = self._vlm_extract(pdf_path, docling_result)
+        # ── Stage 2: VLM (stop Docling, VLM page-by-page) ──────────
+        # Skip VLM if DeepSeek already filled everything
+        incomplete_after_ds = sum(1 for m in docling_result.models if not m.is_complete)
+        if incomplete_after_ds > 0:
+            _p("VLM: остановка Docling...", 25)
+            _gpu_ssh("systemctl stop docling-parser")
+            time.sleep(8)
+
+            _p("VLM: анализ страниц...", 30)
+            vlm_result = self._vlm_extract(pdf_path, docling_result)
+        else:
+            vlm_result = StageResult(source="vlm")
+            logger.info("VLM skipped — all models complete after DeepSeek")
         logger.info("VLM: %d models from %d pages", len(vlm_result.models), vlm_result.pages_processed)
 
         # ── Merge Docling + VLM ─────────────────────────────────────
@@ -117,6 +131,66 @@ class PipelineOrchestrator:
                      result.brand, result.elapsed)
         return result
 
+    def _deepseek_fill(self, docling_result):
+        """Use DeepSeek API to classify columns in raw tables and fill missing values."""
+        try:
+            from pipeline.deepseek_fallback import classify_columns, extract_h_from_table
+        except ImportError:
+            logger.warning("DeepSeek fallback not available")
+            return
+
+        # For each raw table that Strategy 1/2 couldn't fully parse
+        for table in docling_result.raw_tables:
+            cols = table.get("columns", [])
+            rows = table.get("data", [])
+            if not cols or not rows or len(rows) < 3:
+                continue
+
+            # Check if this table has unidentified columns
+            mc, qc, hc, kwc, _ = self.docling._identify_columns(cols)[:5]
+            if mc and hc:
+                continue  # Already identified
+
+            # Ask DeepSeek
+            mapping = classify_columns(cols, rows[:3])
+            if not mapping:
+                continue
+
+            logger.info("DeepSeek classified: %s", mapping)
+
+            # Apply mapping to fill missing values
+            h_col = mapping.get("h")
+            q_col = mapping.get("q")
+            kw_col = mapping.get("kw")
+            model_col = mapping.get("model")
+
+            if not model_col or not h_col:
+                continue
+
+            from models.pump_model import parse_number
+            for row in rows:
+                model_name = str(row.get(model_col, "")).strip()
+                if not model_name or len(model_name) < 3:
+                    continue
+
+                h_val = parse_number(row.get(h_col)) if h_col else None
+                q_val = parse_number(row.get(q_col)) if q_col else None
+                kw_val = parse_number(row.get(kw_col)) if kw_col else None
+
+                # Find matching model in docling_result and fill
+                model_key = model_name.upper().replace(" ", "").replace(",", ".").replace("(", "").replace(")", "")
+                for m in docling_result.models:
+                    if m.key == model_key:
+                        if h_val and not m.h:
+                            m.h = h_val
+                            m.confidence_h = 0.5
+                            m.source_h = "deepseek"
+                        if q_val and not m.q:
+                            m.q = q_val
+                        if kw_val and not m.kw:
+                            m.kw = kw_val
+                        break
+
     def _vlm_extract(self, pdf_path, docling_result):
         """VLM page-by-page extraction. No warmup — model loads on first request."""
         result = StageResult(source="vlm")
@@ -161,8 +235,19 @@ class PipelineOrchestrator:
                 if pg >= len(doc):
                     continue
                 try:
-                    pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(0.75, 0.75))
-                    b64 = base64.b64encode(pix.tobytes("png")).decode()
+                    fitz_mod = __import__("fitz")
+                    pix = doc[pg].get_pixmap(matrix=fitz_mod.Matrix(0.75, 0.75))
+                    # Rotate landscape to portrait (avoids Ollama ggml crash)
+                    if pix.width > pix.height:
+                        from PIL import Image
+                        import io
+                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                        img = img.rotate(90, expand=True)
+                        buf = io.BytesIO()
+                        img.save(buf, format="PNG")
+                        b64 = base64.b64encode(buf.getvalue()).decode()
+                    else:
+                        b64 = base64.b64encode(pix.tobytes("png")).decode()
 
                     task = "extract_pumps"
 
