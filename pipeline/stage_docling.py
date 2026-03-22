@@ -99,9 +99,9 @@ class DoclingStage:
         is_pure_dim = (not has_model_kw and
                        sum(1 for cl in cols_lower if any(d in cl for d in dim_markers)) >= 1)
         if is_pure_dim:
-            return model_col, q_col, h_col, kw_col, rpm_col  # skip this table
+            return model_col, q_col, h_col, kw_col, rpm_col  # skip this table (all None)
 
-        MODEL_KW = ["модель", "model", "тип", "type", "наименование", "насос", "pump", "обозначение"]
+        MODEL_KW = ["модель", "model", "тип", "type", "наименование", "обозначение"]
         Q_KW = ["подача", "расход", "flow", "q,", "q ", "м³/ч", "m3/h", "производительность", "capacity", "qном", "q"]
         H_KW = ["напор", "head", "h,", "h ", "давление", "pressure", "нном", "hном", "h"]
         KW_KW = ["мощность", "power", "квт", "kw", "p2", "p₂", "мощн", "р2"]
@@ -152,8 +152,10 @@ class DoclingStage:
             model_col, q_col, h_col, kw_col, rpm_col = self._identify_columns(cols)
 
             # ── Strategy 1: direct column mapping ──
+            h_is_dim = h_col and ("(мм)" in str(h_col).lower() or "(mm)" in str(h_col).lower())
             if model_col and any([q_col, h_col, kw_col]):
-                self._strategy1(rows, model_col, q_col, h_col, kw_col, rpm_col, page, all_models, seen_keys)
+                h_conf = 0.3 if h_is_dim else 0.6
+                self._strategy1(rows, model_col, q_col, h_col, kw_col, rpm_col, page, all_models, seen_keys, h_confidence=h_conf)
                 continue
 
             # ── Strategy 2: CDM-style (models in headers, params in rows) ──
@@ -175,7 +177,7 @@ class DoclingStage:
 
         return all_models
 
-    def _strategy1(self, rows, model_col, q_col, h_col, kw_col, rpm_col, page, all_models, seen_keys):
+    def _strategy1(self, rows, model_col, q_col, h_col, kw_col, rpm_col, page, all_models, seen_keys, h_confidence=0.6):
         """Strategy 1: direct column mapping."""
         for row in rows:
             model_name = str(row.get(model_col, "")).strip()
@@ -188,22 +190,26 @@ class DoclingStage:
             rpm_val = parse_number(row.get(rpm_col)) if rpm_col else None
 
             pm = self._build_model(model_name, q, h, kw, rpm_val, page)
+            if pm and pm.h and h_confidence != 0.6:
+                pm.confidence_h = h_confidence  # Lower confidence for H(мм) columns
             if pm and pm.key:
                 if pm.key not in seen_keys:
                     seen_keys.add(pm.key)
                     all_models.append(pm)
                 else:
-                    # Update existing if new has more data
+                    # Update existing: fill zeros OR replace low-confidence with higher
                     for i, existing in enumerate(all_models):
                         if existing.key == pm.key:
-                            if pm.h and not existing.h:
+                            if pm.h and (not existing.h or pm.confidence_h > existing.confidence_h):
                                 existing.h = pm.h
                                 existing.confidence_h = pm.confidence_h
                                 existing.source_h = pm.source_h
-                            if pm.q and not existing.q:
+                            if pm.q and (not existing.q or pm.confidence_q > existing.confidence_q):
                                 existing.q = pm.q
-                            if pm.kw and not existing.kw:
+                                existing.confidence_q = pm.confidence_q
+                            if pm.kw and (not existing.kw or pm.confidence_kw > existing.confidence_kw):
                                 existing.kw = pm.kw
+                                existing.confidence_kw = pm.confidence_kw
                             break
 
     def _strategy2(self, rows, cols, header_models, page, all_models, seen_keys):
