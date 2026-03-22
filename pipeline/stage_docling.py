@@ -181,6 +181,16 @@ class DoclingStage:
         for m in all_models:
             if m.q > 1000 or m.h > 500 or m.kw > 500:
                 m.q = 0; m.h = 0; m.kw = 0
+                m.confidence_q = 0; m.confidence_h = 0; m.confidence_kw = 0
+                # Re-enrich from model name (clean data after garbage removal)
+                d = {"model": m.model, "q_nom": 0, "h_nom": 0, "power_kw": 0, "rpm": m.rpm}
+                enrich_from_model_name(d)
+                if d["q_nom"]:
+                    m.q = d["q_nom"]; m.confidence_q = 0.5; m.source_q = "enrichment"
+                if d["h_nom"]:
+                    m.h = d["h_nom"]; m.confidence_h = 0.5; m.source_h = "enrichment"
+                if d["power_kw"]:
+                    m.kw = d["power_kw"]; m.confidence_kw = 0.5; m.source_kw = "enrichment"
 
         return all_models
 

@@ -48,6 +48,11 @@ def parse_number(val):
     # Fractions: take numerator
     if "/" in val:
         val = val.split("/")[0].strip()
+    # Split space-separated numbers: "88 104" -> take first
+    if " " in val:
+        parts = val.split()
+        if len(parts) >= 2 and all(p.replace(".", "").replace(",", "").isdigit() for p in parts):
+            val = parts[0]
     # Strip units
     val = re.sub(r"[^\d.]", "", val)
     if val.count(".") > 1:
