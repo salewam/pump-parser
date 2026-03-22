@@ -188,7 +188,7 @@ class DoclingStage:
             rpm_val = parse_number(row.get(rpm_col)) if rpm_col else None
 
             pm = self._build_model(model_name, q, h, kw, rpm_val, page)
-            if pm.key and pm.key not in seen_keys:
+            if pm and pm.key and pm.key not in seen_keys:
                 seen_keys.add(pm.key)
                 all_models.append(pm)
 
@@ -237,6 +237,12 @@ class DoclingStage:
 
     def _build_model(self, model_name, q, h, kw, rpm_val, page):
         """Build PumpModelResult with enrichment and validation."""
+        # Filter garbage: pure digits (articles), too short, known junk
+        name_clean = model_name.strip()
+        if not name_clean or len(name_clean) < 3:
+            return None
+        if name_clean.replace("-", "").replace(".", "").replace(",", "").replace(" ", "").isdigit():
+            return None  # Pure number like "114001" or "12.5" — article or value, not model
         series = detect_series(model_name)
         pm = PumpModelResult(
             model=model_name,
