@@ -143,12 +143,13 @@ class PipelineOrchestrator:
                 pages_to_check = []
                 for pg_i in range(len(doc)):
                     text = doc[pg_i].get_text()
-                    # Skip if page has < 3 numbers (no table data)
                     nums = _re.findall(r'\d+[.,]\d+', text)
-                    # Skip cover/contents pages
+                    # Must have pump-related keywords AND enough numbers
+                    has_pump_data = bool(_re.search(r'Артикул|кВт|м3/ч|Мощность|power|kW|flow|head|Qном|Нном', text, _re.I))
                     has_models = bool(_re.search(r'[A-ZА-Я]{2,5}\s*\d+[-]\d+', text))
-                    has_table_data = len(nums) >= 5
-                    if has_models or has_table_data:
+                    if has_pump_data and len(nums) >= 5:
+                        pages_to_check.append(pg_i)
+                    elif has_models and len(nums) >= 10:
                         pages_to_check.append(pg_i)
                 logger.info("VLM: %d/%d pages have table data", len(pages_to_check), len(doc))
 
