@@ -103,7 +103,9 @@ class DoclingStage:
 
         MODEL_KW = ["модель", "model", "тип", "type", "наименование", "обозначение"]
         Q_KW = ["подача", "расход", "flow", "q,", "q ", "м³/ч", "m3/h", "производительность", "capacity", "qном", "q"]
-        H_KW = ["напор", "head", "h,", "h ", "давление", "pressure", "нном", "hном", "h"]
+        H_KW = ["напор", "head", "h,", "h ", "давление", "pressure", "нном", "hном"]
+        # "h" alone is too generic — matches H1, H2 (dimensions). Only match exact "h" or "h (m)"
+        H_EXACT = ["h"]  # exact match only (not substring)
         KW_KW = ["мощность", "power", "квт", "kw", "p2", "p₂", "мощн", "р2"]
         RPM_KW = ["об/мин", "rpm", "частота вращения", "скорость", "n,"]
 
@@ -113,7 +115,7 @@ class DoclingStage:
                 model_col = col
             elif not q_col and any(k in cl for k in Q_KW):
                 q_col = col
-            elif not h_col and any(k in cl for k in H_KW):
+            elif not h_col and (any(k in cl for k in H_KW) or cl.strip() in H_EXACT):
                 h_col = col
             elif not kw_col and any(k in cl for k in KW_KW):
                 kw_col = col
@@ -261,9 +263,11 @@ class DoclingStage:
         # Clean: strip phase prefixes (universal — any catalog may have them)
         name_clean = model_name.strip()
         name_clean = _re.sub(r'^(трёхфазный|трехфазный|однофазный|3-phase|1-phase|three.?phase|single.?phase)\s*', '', name_clean, flags=_re.I).strip()
-        # Split merged names: "PVn4-5 PVn4-6" → take first
-        if _re.search(r'[A-ZА-Я]{2}\S+\s+[A-ZА-Я]{2}\S+', name_clean):
-            name_clean = name_clean.split()[0]
+        # Split merged names: "PVn4-5 PVn4-6" or "МВL 32-200-4/2 МВL 32-200-5.5/2"
+        # Detect: if name contains 2+ pump-like patterns separated by space
+        _pump_parts = _re.findall(r'[A-ZА-Яa-zа-я]{2,5}\s*\d+[-/]\d+\S*', name_clean)
+        if len(_pump_parts) >= 2:
+            name_clean = _pump_parts[0].strip()
         # Filter garbage
         if not name_clean or len(name_clean) < 3:
             return None
