@@ -177,6 +177,11 @@ class DoclingStage:
                         seen_keys.add(pm.key)
                         all_models.append(pm)
 
+        # Final validation: catch obvious garbage from dedup updates
+        for m in all_models:
+            if m.q > 1000 or m.h > 500 or m.kw > 500:
+                m.q = 0; m.h = 0; m.kw = 0
+
         return all_models
 
     def _strategy1(self, rows, model_col, q_col, h_col, kw_col, rpm_col, page, all_models, seen_keys, h_confidence=0.6):
