@@ -257,13 +257,20 @@ class DoclingStage:
 
     def _build_model(self, model_name, q, h, kw, rpm_val, page):
         """Build PumpModelResult with enrichment and validation."""
-        # Filter garbage: pure digits (articles), too short, known junk
+        import re as _re
+        # Clean: strip phase prefixes (universal — any catalog may have them)
         name_clean = model_name.strip()
+        name_clean = _re.sub(r'^(трёхфазный|трехфазный|однофазный|3-phase|1-phase|three.?phase|single.?phase)\s*', '', name_clean, flags=_re.I).strip()
+        # Split merged names: "PVn4-5 PVn4-6" → take first
+        if _re.search(r'[A-ZА-Я]{2}\S+\s+[A-ZА-Я]{2}\S+', name_clean):
+            name_clean = name_clean.split()[0]
+        # Filter garbage
         if not name_clean or len(name_clean) < 3:
             return None
         if name_clean.replace("-", "").replace(".", "").replace(",", "").replace(" ", "").isdigit():
-            return None  # Pure number like "114001" or "12.5" — article or value, not model
-        series = detect_series(model_name)
+            return None
+        series = detect_series(name_clean)
+        model_name = name_clean  # use cleaned name
         pm = PumpModelResult(
             model=model_name,
             series=series,
