@@ -161,7 +161,7 @@ class PipelineOrchestrator:
                 if pg >= len(doc):
                     continue
                 try:
-                    pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(1.2, 1.2))
+                    pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(0.75, 0.75))
                     b64 = base64.b64encode(pix.tobytes("png")).decode()
 
                     task = "extract_pumps"
@@ -205,6 +205,23 @@ class PipelineOrchestrator:
                     logger.info("VLM pg%d: response OK", pg)
 
                     pumps = d.get("pumps", [])
+                    # Also try parsing from raw text (minicpm-v returns JSON in text)
+                    if not pumps and d.get("raw"):
+                        import json as _json
+                        raw = d["raw"]
+                        try:
+                            # Extract JSON from text
+                            if "```json" in raw:
+                                raw = raw.split("```json")[1].split("```")[0]
+                            elif "{" in raw:
+                                raw = raw[raw.index("{"):raw.rindex("}") + 1]
+                            parsed = _json.loads(raw)
+                            if isinstance(parsed, dict) and "pumps" in parsed:
+                                pumps = parsed["pumps"]
+                            elif isinstance(parsed, list):
+                                pumps = parsed
+                        except Exception:
+                            pass
                     if pumps:
                         for p in pumps:
                             name = str(p.get("model", "")).strip()
@@ -245,7 +262,7 @@ class PipelineOrchestrator:
                 logger.info("VLM retry: %d failed pages", len(failed_pages))
                 for pg in failed_pages:
                     try:
-                        pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(1.2, 1.2))
+                        pix = doc[pg].get_pixmap(matrix=__import__("fitz").Matrix(0.75, 0.75))
                         b64 = base64.b64encode(pix.tobytes("png")).decode()
                         r = requests.post(
                             f"http://{GPU_HOST}:8000/analyze",
