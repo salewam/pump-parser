@@ -188,9 +188,23 @@ class DoclingStage:
             rpm_val = parse_number(row.get(rpm_col)) if rpm_col else None
 
             pm = self._build_model(model_name, q, h, kw, rpm_val, page)
-            if pm and pm.key and pm.key not in seen_keys:
-                seen_keys.add(pm.key)
-                all_models.append(pm)
+            if pm and pm.key:
+                if pm.key not in seen_keys:
+                    seen_keys.add(pm.key)
+                    all_models.append(pm)
+                else:
+                    # Update existing if new has more data
+                    for i, existing in enumerate(all_models):
+                        if existing.key == pm.key:
+                            if pm.h and not existing.h:
+                                existing.h = pm.h
+                                existing.confidence_h = pm.confidence_h
+                                existing.source_h = pm.source_h
+                            if pm.q and not existing.q:
+                                existing.q = pm.q
+                            if pm.kw and not existing.kw:
+                                existing.kw = pm.kw
+                            break
 
     def _strategy2(self, rows, cols, header_models, page, all_models, seen_keys):
         """Strategy 2: CDM-style — models in headers, params in rows."""
