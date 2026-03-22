@@ -93,8 +93,12 @@ class DoclingStage:
 
         # Skip dimension tables (L1, L2, B1, etc.)
         cols_lower = [str(c).lower().strip() for c in cols]
-        dim_markers = ["l1", "l2", "l3", "b1", "b2", "размер", "габарит", "dimension"]
-        if sum(1 for cl in cols_lower if any(d in cl for d in dim_markers)) >= 2:
+        # Skip ONLY if table has NO model column AND is purely dimensions
+        dim_markers = ["размеры [мм]", "dimensions [mm]", "габаритные размеры"]
+        has_model_kw = any(any(k in cl for k in ["модель", "model", "насос", "pump", "наименование"]) for cl in cols_lower)
+        is_pure_dim = (not has_model_kw and
+                       sum(1 for cl in cols_lower if any(d in cl for d in dim_markers)) >= 1)
+        if is_pure_dim:
             return model_col, q_col, h_col, kw_col, rpm_col  # skip this table
 
         MODEL_KW = ["модель", "model", "тип", "type", "наименование", "насос", "pump", "обозначение"]
@@ -157,6 +161,17 @@ class DoclingStage:
             if header_models and len(rows) >= 3:
                 self._strategy2(rows, cols, header_models, page, all_models, seen_keys)
                 continue
+
+            # ── Strategy 3: model column only (no Q/H/kW) — enrich from name ──
+            if model_col:
+                for row in rows:
+                    model_name = str(row.get(model_col, "")).strip()
+                    if not model_name or len(model_name) < 5:
+                        continue
+                    pm = self._build_model(model_name, None, None, None, None, page)
+                    if pm and pm.key and pm.key not in seen_keys and (pm.q > 0 or pm.kw > 0):
+                        seen_keys.add(pm.key)
+                        all_models.append(pm)
 
         return all_models
 
