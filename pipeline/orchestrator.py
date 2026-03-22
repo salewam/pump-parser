@@ -154,7 +154,9 @@ class PipelineOrchestrator:
 
             ollama_ready = False
 
-            for pg in pages_to_check:
+            logger.info("VLM: processing %d pages: %s", len(pages_to_check), pages_to_check[:10])
+            for pg_idx, pg in enumerate(pages_to_check):
+                logger.info("VLM page %d/%d (pg%d)", pg_idx+1, len(pages_to_check), pg)
                 if pg >= len(doc):
                     continue
                 try:
@@ -199,6 +201,7 @@ class PipelineOrchestrator:
                         continue
 
                     ollama_ready = True
+                    logger.info("VLM pg%d: response OK", pg)
 
                     pumps = d.get("pumps", [])
                     if pumps:
