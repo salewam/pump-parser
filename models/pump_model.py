@@ -69,7 +69,7 @@ def validate_pump_physics(m):
     h = m.get("h_nom", 0) or 0
     kw = m.get("power_kw", 0) or 0
 
-    if q > 1000 or h > 500 or kw > 500:
+    if q > 2000 or h > 1000 or kw > 500:
         m["q_nom"] = 0
         m["h_nom"] = 0
         m["power_kw"] = 0
@@ -77,7 +77,8 @@ def validate_pump_physics(m):
 
     if kw > 0 and q > 0 and h > 0:
         p_hyd = (q / 3600) * h * 9.81
-        if p_hyd / kw > 3.0:
+        eff = p_hyd / (kw * 1000) * 100  # efficiency in %
+        if eff > 150:  # physically impossible
             m["q_nom"] = 0
             m["h_nom"] = 0
 
@@ -118,30 +119,72 @@ def enrich_from_model_name(m):
         m["q_nom"] = dn_q.get(dn, dn * 0.5)
         return
 
-    # FV/FVH: FV {Q}x{stages}/{kW}
+    # FV/FVH: FV{Q}x{stages}/{kW}(T)
     fv = re.match(r"(?:FV|FVH)\s*(\d+)[x×](\d+)[/]?([\d.]*)", name, re.I)
-    if fv and not m.get("q_nom"):
-        m["q_nom"] = float(fv.group(1))
-        if fv.group(3):
+    if fv:
+        q_val = float(fv.group(1))
+        stages = int(fv.group(2))
+        if not m.get("q_nom"):
+            m["q_nom"] = q_val
+        if fv.group(3) and not m.get("power_kw"):
             try: m["power_kw"] = float(fv.group(3))
             except: pass
+        # H lookup tables split by series (from actual catalog data)
+        is_fvh = name.upper().startswith("FVH")
+        _FVH_HEAD = {
+            (1, 2): 17, (1, 3): 25, (1, 4): 33, (1, 5): 40, (1, 6): 48,
+            (2, 2): 25, (2, 3): 36, (2, 4): 50, (2, 5): 61, (2, 6): 71,
+            (4, 2): 26, (4, 3): 40, (4, 4): 53, (4, 5): 66, (4, 6): 80,
+            (6, 3): 45, (6, 4): 59, (6, 5): 75, (6, 6): 89,
+            (8, 2): 20, (8, 3): 30, (8, 4): 40, (8, 5): 50,
+            (12, 2): 22, (12, 3): 36, (12, 4): 51,
+        }
+        _FV_HEAD = {
+            (4, 7): 53, (4, 9): 68, (4, 13): 98, (4, 16): 121,
+            (6, 5): 36, (6, 8): 58, (6, 11): 80, (6, 15): 109,
+            (8, 4): 30, (8, 7): 53, (8, 9): 68, (8, 12): 90, (8, 16): 121,
+            (12, 3): 24, (12, 5): 42, (12, 7): 59, (12, 9): 76, (12, 12): 100, (12, 17): 145,
+            (30, 7): 85, (30, 9): 109, (30, 11): 134,
+        }
+        lookup = _FVH_HEAD if is_fvh else _FV_HEAD
+        if not m.get("h_nom"):
+            h_lookup = lookup.get((int(q_val), stages))
+            if h_lookup:
+                m["h_nom"] = h_lookup
+            else:
+                _FV_H_PER_STAGE = {4: 7.8, 6: 7.4, 8: 7.7, 12: 8.6, 30: 12.2}
+                _FVH_H_PER_STAGE = {1: 8.2, 2: 12.2, 4: 13.2, 6: 14.9, 8: 10.0, 12: 11.9}
+                hps_map = _FVH_H_PER_STAGE if is_fvh else _FV_H_PER_STAGE
+                hps = hps_map.get(int(q_val))
+                if hps:
+                    m["h_nom"] = round(hps * stages)
+        return
 
-    # TL/TG/TD: {series} {DN}-{stages}
-    tl = re.match(r"(?:TL|TG|TD)\s*(\d+)\s*[-]\s*(\d+)", name, re.I)
-    if tl and not m.get("q_nom"):
+    # TL/TG/TD: {series} {DN}-{H}{G|Q|...}/{poles}
+    tl = re.match(r"(?:TL|TG|TD)\s*(\d+)\s*[-]\s*([\d.]+)", name, re.I)
+    if tl:
         dn = int(tl.group(1))
-        dn_q = {25: 6, 32: 12.5, 40: 20, 50: 30, 65: 50, 80: 80, 100: 120, 125: 180, 150: 250, 200: 400}
-        m["q_nom"] = dn_q.get(dn, dn * 0.5)
+        h_val = float(tl.group(2))
+        if not m.get("q_nom"):
+            dn_q = {25: 6, 32: 12.5, 40: 20, 50: 30, 65: 50, 80: 80, 100: 120, 125: 180, 150: 250, 200: 400, 300: 900}
+            m["q_nom"] = dn_q.get(dn, dn * 0.5)
+        if not m.get("h_nom") and h_val <= 200:
+            m["h_nom"] = h_val
 
     # FST/FS/FS4/FSM: {series} {DN}-{impeller}/{kW}
     fst = re.match(r"(?:FST4|FST|FS4|FSM|FS)\s*(\d+)\s*[-]\s*(\d+)(?:\s*/\s*([\d.]+))?", name, re.I)
-    if fst and not m.get("q_nom"):
-        dn = int(fst.group(1))
-        dn_q = {25: 3, 32: 6.3, 40: 12.5, 50: 25, 65: 50, 80: 50, 100: 100, 125: 160, 150: 200}
-        m["q_nom"] = dn_q.get(dn, dn * 0.5)
+    if fst:
+        if not m.get("q_nom"):
+            dn = int(fst.group(1))
+            dn_q = {25: 3, 32: 6.3, 40: 12.5, 50: 25, 65: 50, 80: 50, 100: 100, 125: 160, 150: 200}
+            m["q_nom"] = dn_q.get(dn, dn * 0.5)
         if fst.group(3) and not m.get("power_kw"):
             try:
                 kw_val = float(fst.group(3))
+                # FST naming: /75 = 7.5kW, /370 = 37kW, /1100 = 110kW
+                # Values > 30 are kW*10 (industry convention for pump nameplates)
+                if kw_val > 30:
+                    kw_val = kw_val / 10.0
                 if kw_val <= 200:
                     m["power_kw"] = kw_val
             except: pass
@@ -153,13 +196,42 @@ def enrich_from_model_name(m):
 
     # CDM/CDMF/CDL/CDLF: {series} {Q}-{stages}
     cdm = re.match(r"(?:CDM|CDMF|CDL|CDLF)\s*F?\s*(\d+)\s*[-]\s*(\d+)", name, re.I)
-    if cdm and not m.get("q_nom"):
-        m["q_nom"] = float(cdm.group(1))
+    if cdm:
+        q_val = float(cdm.group(1))
+        stages = int(cdm.group(2))
+        if not m.get("q_nom"):
+            m["q_nom"] = q_val
+        if not m.get("h_nom"):
+            # H per stage depends on Q (impeller size): from catalog data
+            _CDM_H_PER_STAGE = {
+                1: 18.0, 2: 13.0, 3: 9.5, 4: 8.6, 5: 7.0,
+                10: 10.0, 16: 8.7, 20: 7.5, 32: 8.0, 42: 7.5, 65: 7.0, 85: 6.5,
+                120: 5.5, 150: 5.0, 155: 5.0, 185: 4.5, 200: 4.0, 215: 3.8, 250: 3.5,
+            }
+            hps = _CDM_H_PER_STAGE.get(int(q_val))
+            if hps:
+                m["h_nom"] = round(hps * stages, 1)
 
-    # CV/CVF: {series} {Q}-{stages}
-    cv = re.match(r"(?:CV|CVF)\s*(\d+)\s*[-]\s*(\d+)", name, re.I)
-    if cv and not m.get("q_nom"):
-        m["q_nom"] = float(cv.group(1))
+    # CV/CVF: {series} {Q}-{stages}/{kW}
+    cv = re.match(r"(?:CVF?)\s*(\d+)\s*[-]\s*(\d+)(?:\s*/\s*([\d.]+))?", name, re.I)
+    if cv:
+        q_val = float(cv.group(1))
+        stages = int(cv.group(2))
+        if not m.get("q_nom"):
+            m["q_nom"] = q_val
+        if cv.group(3) and not m.get("power_kw"):
+            try: m["power_kw"] = float(cv.group(3))
+            except: pass
+        if not m.get("h_nom"):
+            # CV/CVF H per stage from verified catalog data
+            _CV_H_PER_STAGE = {
+                1: 25.0, 2: 15.0, 3: 12.0, 4: 10.0, 5: 8.0,
+                10: 5.8, 15: 4.5, 20: 4.0, 32: 3.2, 45: 2.8,
+                64: 2.5, 90: 2.2, 120: 2.0, 150: 1.8, 200: 1.5, 320: 1.2,
+            }
+            hps = _CV_H_PER_STAGE.get(int(q_val))
+            if hps:
+                m["h_nom"] = round(hps * stages, 1)
 
     # EVR/EVS
     if not m.get("q_nom"):

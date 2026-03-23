@@ -44,24 +44,91 @@ MAX_PARALLEL_GPU = 3  # GPU server has 3 workers
 DEEPSEEK_API_KEY = os.environ.get("DEEPSEEK_API_KEY", "")
 BACKUP_API_KEY = os.environ.get("BACKUP_API_KEY", "")
 
-# ── Known Series ────────────────────────────────────────────────────
+# ── Known Series (universal — all brands) ───────────────────────────
 KNOWN_SERIES = {
+    # Wellmix
     "CDM", "CDMF", "CDL", "CDLF", "CV", "CVF", "CMI", "PV",
-    "MV", "MVS", "EVR", "EVS", "TG", "TL", "TD", "INL", "MBL",
-    "FV", "FVH", "FST", "FS", "FS4", "FSM", "NBS", "EST", "ESST",
-    "LVR", "CHL", "CHLF", "BM", "BMN",
+    "TG", "TL", "TD", "NBS", "CHL", "CHLF",
+    # ONIS
+    "MV", "MVS", "INL", "MBL",
+    # Fancy
+    "FV", "FVH", "FST", "FS", "FS4", "FSM", "FZ",
+    "CHL", "CHLF", "BM", "BMN",
+    # Aquastrong
+    "EVR", "EVS", "EST", "ESST", "EJ", "EWS",
+    # Lowara
+    "LVR", "CEA", "CA", "CAM", "e-SV", "e-HM", "e-NSC", "e-GS",
+    "FH", "FC", "FCT", "ESH", "VM", "BG", "CO", "SVI",
+    "SCUBA", "DOC", "DOMO", "DIWA",
+    # CNP
+    "ZS", "SJ",
+    # Ebara
+    "DW", "DWF", "CDX", "CDXM", "MATRIX", "EVMS", "GP", "GPE",
+    "CDA", "BestOne", "3D",
+    # Pedrollo
+    "PK", "PKm", "CP", "CPm", "F", "HT", "RX", "4SR", "6SR",
+    "TOP", "UP", "D", "BC",
+    # Grundfos
+    "CR", "CRI", "CRN", "CRE", "CM", "CME", "SP",
+    # Wilo
+    "MHI", "MHIL", "MVI", "MVIL", "Helix",
+    "CronoLine", "CronoTwin", "CronoBloc",
+    # KSB
+    "Etanorm", "Movitec", "Multitec", "MegaCPK",
+    # DAB
+    "SET", "NKM", "NKP", "KDN", "KH", "NOVA", "FEKA", "DRENAG",
+    "VEA", "VA", "ALM", "KLM", "DKLM",
 }
 
-HORIZONTAL_SERIES = {"INL", "MBL", "FVH", "FV", "FST", "FS", "FS4", "FSM", "NBS"}
+HORIZONTAL_SERIES = {"INL", "MBL", "FVH", "FV", "FST", "FS", "FS4", "FSM", "NBS",
+                     "CEA", "CA", "CAM", "FH", "FC", "CO", "e-NSC", "e-HM",
+                     "F", "CP", "CPm", "PK", "PKm", "CR", "CRI", "CRN", "CM", "CME",
+                     "Etanorm", "MHI", "MHIL", "ZS"}
 VERTICAL_SERIES = {"MV", "MVS", "CDM", "CDMF", "CDL", "CDLF", "CV", "CVF",
-                   "EVR", "EVS", "CMI", "PV", "TG", "TL", "TD", "EST", "ESST"}
+                   "EVR", "EVS", "CMI", "PV", "TG", "TL", "TD", "EST", "ESST",
+                   "e-SV", "e-GS", "SCUBA", "SVI", "4SR", "6SR",
+                   "MVI", "MVIL", "EVMS", "Movitec", "Multitec", "SP"}
 FLAGSHIP_SERIES = {"MV", "INL", "MBL"}
 
-# ── Pump Model Regex ────────────────────────────────────────────────
+# ── Pump Model Regex (universal) ────────────────────────────────────
+# Matches any pump model: series prefix + numbers with separators
+# Examples: CDM32-1-1, CR 1-2, MHI 204, F 32/160C, PKm65, e-SV 5SV07,
+#           Etanorm 040-025-160, ZS 65-40-200/7.5, DW 75, MATRIX 3-2T/0.45
 PUMP_MODEL_RE = (
-    r"(CDM|CDMF|CV|CVF|CMI|NBS|TG|TL|TD|FST|FS4|FSM|FV|FVH|EVR|EVS|"
-    r"CDL|CDLF|INL|MBL|МВL|МBL|CHL|CHLF|BM|BMN)"
-    r"\s*[/]?\s*\w*\s*\d+[\s-]*\d*"
+    r"(?:"
+    # Original ONIS/Wellmix/Fancy/Aquastrong series
+    r"(?:CDM|CDMF|CV|CVF|CMI|NBS|TG|TL|TD|FST|FS4|FSM|FV|FVH|EVR|EVS|"
+    r"CDL|CDLF|INL|MBL|МВL|МBL|CHL|CHLF|BM|BMN|LVR|EST|ESST|LLT)"
+    r"|"
+    # Lowara series
+    r"(?:CEA|CA[M]?|e-SV|e-HM|e-NSC|e-GS|e-LNE|e-IXP|FH[EFS]?|FC[T]?|"
+    r"ESH|VM|BG|CO|SVI|DOC|DOMO|DIWA|SCUBA|\dSC)"
+    r"|"
+    # CNP
+    r"(?:ZS|SJ)"
+    r"|"
+    # Ebara
+    r"(?:DW[F]?|CDX[M]?|MATRIX|EVMS[NKL]?|GP[E]?|CDA|BestOne)"
+    r"|"
+    # Pedrollo
+    r"(?:PK[m]?|CP[m]?|HT|RX|TOP|UP|BC|\d+SR|\d+HR)"
+    r"|"
+    # Grundfos
+    r"(?:CR[IENM]?|CM[E]?|SP[A]?)"
+    r"|"
+    # Wilo
+    r"(?:MHI[L]?|MVI[LSE]?|Helix|CronoLine|CronoTwin|CronoBloc)"
+    r"|"
+    # KSB
+    r"(?:Etanorm|Movitec|Multitec|MegaCPK)"
+    r"|"
+    # DAB
+    r"(?:SET|NKM|NKP|KDN|KH|NOVA|FEKA|DRENAG|VEA|ALM|KLM|DKLM)"
+    r"|"
+    # Generic fallback: 1-5 letters + digit + separator + digits
+    r"(?:[A-ZА-Я]{1,5}\d)"
+    r")"
+    r"\s*[/]?\s*\w*\s*\d+[\s\-/]*\d*"
 )
 
 # ── Flask ───────────────────────────────────────────────────────────
